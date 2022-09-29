@@ -1,0 +1,35 @@
+on:
+  push:
+    # Sequence of patterns matched against refs/tags
+    tags:
+      - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+
+name: Create Release
+
+jobs:
+  build:
+    name: Create Release
+    runs-on: ubuntu-20.04
+    steps:
+      - id: get-version
+        uses: battila7/get-version-action@v2
+
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      
+      - id: release-asset
+        run: |
+          version=${{ steps.get-version.outputs.version-without-v }}
+          cd ..
+          cp -r ot-br-posix ot-br-posix-$version
+          rm -rf ot-br-posix-$version/.git*
+          tar zcfv ot-br-posix-$version.tar.gz ot-br-posix-$version
+      - name: Automatic Releases
+        uses: marvinpinto/action-automatic-releases@v1.2.1
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          automatic_release_tag: "latest"
+          draft: false
+          prerelease: false
+          files: ../ot-br-posix-*.tar.gz
