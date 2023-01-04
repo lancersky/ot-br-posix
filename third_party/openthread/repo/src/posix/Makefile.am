@@ -68,6 +68,7 @@ endif
 
 if OPENTHREAD_TARGET_LINUX
 LDADD_COMMON                                                          += \
+    -lanl                                                                \
     -lrt                                                                 \
     $(NULL)
 endif

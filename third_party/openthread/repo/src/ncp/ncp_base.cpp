@@ -221,7 +221,9 @@ NcpBase::NcpBase(Instance *aInstance)
     , mDiscoveryScanEnableFiltering(false)
     , mDiscoveryScanPanId(0xffff)
 #if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
+#if OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
     , mHandlePendingCommandsTask(*aInstance, NcpBase::HandlePendingCommands)
+#endif
 #endif
     , mUpdateChangedPropsTask(*aInstance, NcpBase::UpdateChangedProps)
     , mThreadChangedFlags(0)
@@ -887,6 +889,9 @@ otError NcpBase::EnqueuePendingCommand(PendingCommandType aType, uint8_t aHeader
         break;
 
     case kPendingCommandTypeEnergyScan:
+        // We dont have access to header, but mCurCommandIID
+        // is updated in HandleReceive, use that instead.
+        entry->mIid         = mCurCommandIID;
         entry->mScanChannel = aScanChannel;
         break;
 
@@ -936,7 +941,7 @@ otError NcpBase::HandlePendingEnergyScan(PendingCommandEntry *entry)
 exit:
     if (error != OT_ERROR_NONE)
     {
-        LinkRawEnergyScanDone(ot::Mac::SubMac::kInvalidRssiValue);
+        LinkRawEnergyScanDone(Radio::kInvalidRssi);
     }
     return error;
 }
@@ -1230,7 +1235,6 @@ otError NcpBase::HandleCommandPropertyInsertRemove(uint8_t aHeader, spinel_prop_
 
     default:
         OT_ASSERT(false);
-        OT_UNREACHABLE_CODE(break);
     }
 
     VerifyOrExit(handler != nullptr, error = PrepareLastStatusResponse(aHeader, SPINEL_STATUS_PROP_NOT_FOUND));
@@ -1551,7 +1555,7 @@ otError NcpBase::HandlePropertySet_SPINEL_PROP_NEST_STREAM_MFG(uint8_t aHeader)
     }
 #endif
 
-    otDiagProcessCmdLine(mInstance, string, output, sizeof(output));
+    SuccessOrExit(error = otDiagProcessCmdLine(mInstance, string, output, sizeof(output)));
 
     // Prepare the response
     SuccessOrExit(error = mEncoder.BeginFrame(aHeader, SPINEL_CMD_PROP_VALUE_IS, SPINEL_PROP_NEST_STREAM_MFG));
@@ -2636,7 +2640,6 @@ template <> otError NcpBase::HandlePropertySet<SPINEL_PROP_DEBUG_NCP_LOG_LEVEL>(
 
     default:
         ExitNow(error = OT_ERROR_INVALID_ARGS);
-        OT_UNREACHABLE_CODE(break);
     }
 
     IgnoreError(otLoggingSetLevel(logLevel));

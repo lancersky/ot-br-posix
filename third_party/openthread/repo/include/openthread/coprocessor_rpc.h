@@ -62,14 +62,6 @@ extern "C" {
 void otCliAppendResult(otError aError);
 
 /**
- * This method sets the user command error
- *
- * @param[in]  aError         An error
- *
- */
-void otCliSetUserCommandError(otError aError);
-
-/**
  * Call the corresponding handler for a command
  *
  * This function will look through @p aCommands to find a command that matches
@@ -172,7 +164,7 @@ void otCRPCProcessCmdLine(const char *aString, char *aOutput, size_t aOutputMaxL
  * @param aArgsLength
  * @param aArgs
  */
-void otCRPCProcessHelp(void *aContext, uint8_t aArgsLength, char *aArgs[]);
+otError otCRPCProcessHelp(void *aContext, uint8_t aArgsLength, char *aArgs[]);
 
 /**
  * Set a user command table.

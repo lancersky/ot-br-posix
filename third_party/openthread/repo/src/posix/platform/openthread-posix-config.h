@@ -86,12 +86,16 @@
 #define OT_POSIX_RCP_BUS_SPI 2
 
 /**
- * RCP bus UART.
- *
- * @note This value is also for simulated UART bus.
+ * RCP bus defined by vendors.
  *
  */
-#define OT_POSIX_RCP_BUS_CPC 3
+#define OT_POSIX_RCP_BUS_VENDOR 3
+
+/**
+ * RCP bus CPC.
+ *
+ */
+#define OT_POSIX_RCP_BUS_CPC 4
 
 /**
  * @def OPENTHREAD_POSIX_CONFIG_RCP_BUS
@@ -217,6 +221,16 @@
 #endif
 
 /**
+ * @def OPENTHREAD_POSIX_CONFIG_NAT64_AIL_PREFIX_ENABLE
+ *
+ * Define as 1 to enable discovering NAT64 posix on adjacent infrastructure link.
+ *
+ */
+#ifndef OPENTHREAD_POSIX_CONFIG_NAT64_AIL_PREFIX_ENABLE
+#define OPENTHREAD_POSIX_CONFIG_NAT64_AIL_PREFIX_ENABLE 0
+#endif
+
+/**
  * @def OPENTHREAD_POSIX_CONFIG_FIREWALL_ENABLE
  *
  * Define as 1 to enable firewall.
@@ -286,4 +300,33 @@
 #define OPENTHREAD_POSIX_CONFIG_TREL_UDP_PORT 0
 #endif
 
+/**
+ * @def OPENTHREAD_POSIX_CONFIG_NAT64_CIDR
+ *
+ * This setting configures the NAT64 CIDR, used by NAT64 translator.
+ *
+ */
+#ifndef OPENTHREAD_POSIX_CONFIG_NAT64_CIDR
+#define OPENTHREAD_POSIX_CONFIG_NAT64_CIDR "192.168.255.0/24"
+#endif
+
+/**
+ * @def OPENTHREAD_POSIX_CONFIG_BACKTRACE_ENABLE
+ *
+ * Define as 1 to enable backtrace support.
+ *
+ */
+#ifndef OPENTHREAD_POSIX_CONFIG_BACKTRACE_ENABLE
+#define OPENTHREAD_POSIX_CONFIG_BACKTRACE_ENABLE 1
+#endif
+
+/**
+ * @def OPENTHREAD_POSIX_CONFIG_ANDROID_ENABLE
+ *
+ * Define as 1 to enable android support.
+ *
+ */
+#ifndef OPENTHREAD_POSIX_CONFIG_ANDROID_ENABLE
+#define OPENTHREAD_POSIX_CONFIG_ANDROID_ENABLE 0
+#endif
 #endif // OPENTHREAD_PLATFORM_CONFIG_H_

@@ -52,9 +52,9 @@ extern "C" {
 typedef struct otCliCommand
 {
     const char *mName; ///< A pointer to the command string.
-    void (*mCommand)(void *  aContext,
-                     uint8_t aArgsLength,
-                     char *  aArgs[]); ///< A function pointer to process the command.
+    otError (*mCommand)(void *  aContext,
+                        uint8_t aArgsLength,
+                        char *  aArgs[]); ///< A function pointer to process the command.
 } otCliCommand;
 
 /**
@@ -106,14 +106,6 @@ void otCliInputLine(char *aBuf);
  *
  */
 void otCliSetUserCommands(const otCliCommand *aUserCommands, uint8_t aLength, void *aContext);
-
-/**
- * This method sets the user command error
- *
- * @param[in]  aError         An error
- *
- */
-void otCliSetUserCommandError(otError aError);
 
 /**
  * Write a number of bytes to the CLI console as a hex string.

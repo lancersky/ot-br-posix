@@ -38,12 +38,14 @@ if(NOT DEFINED OT_PLATFORM_LIB_MTD)
 endif()
 
 target_link_libraries(ot-ncp-mtd PRIVATE
+    $<$<BOOL:${OT_LINKER_MAP}>:-Wl,-Map=bin/ot-ncp-mtd.map>
     openthread-ncp-mtd
     ${OT_PLATFORM_LIB_MTD}
     openthread-mtd
     ${OT_PLATFORM_LIB_MTD}
     openthread-ncp-mtd
     ${OT_MBEDTLS}
+    ot-config-mtd
     ot-config
 )
 

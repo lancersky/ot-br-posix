@@ -210,8 +210,8 @@ private:
     {
         kMaxFrameSize       = SL_CPC_READ_MINIMUM_SIZE,
         kMaxWaitTime        = 2000, ///< Maximum wait time in Milliseconds for socket to become writable (see `SendFrame`).
-        kMaxSleepDuration   = 1000,
-        kMaxRestartAttempts = 10,
+        kMaxSleepDuration   = 100000,  ///< Sleep duration in micro seconds before restarting cpc connection.
+        kMaxRestartAttempts = 300,
         kResetCMDSize       = 4,
         kCpcBusSpeed        = 115200,
     };
@@ -223,8 +223,6 @@ private:
     int                 mSockFd;
     cpc_handle_t        mHandle;
     cpc_endpoint_t      mEndpoint;
-    cpc_read_flags_t    mReadFlags;
-    cpc_write_flags_t   mWriteFlags;
     uint32_t            mCpcBusSpeed;
 
     static void HandleSecondaryReset(void);

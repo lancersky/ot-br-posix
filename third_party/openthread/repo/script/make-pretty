@@ -83,7 +83,6 @@ readonly OT_CLANG_TIDY_BUILD_OPTS=(
     '-DOT_BORDER_AGENT=ON'
     '-DOT_BORDER_ROUTER=ON'
     '-DOT_BORDER_ROUTING=ON'
-    '-DOT_BORDER_ROUTING_NAT64=ON'
     '-DOT_CHANNEL_MANAGER=ON'
     '-DOT_CHANNEL_MONITOR=ON'
     '-DOT_CHILD_SUPERVISION=ON'
@@ -113,6 +112,8 @@ readonly OT_CLANG_TIDY_BUILD_OPTS=(
     '-DOT_LINK_METRICS_SUBJECT=ON'
     '-DOT_MAC_FILTER=ON'
     '-DOT_MTD_NETDIAG=ON'
+    '-DOT_NAT64_BORDER_ROUTING=ON'
+    '-DOT_NAT64_TRANSLATOR=ON'
     '-DOT_NETDATA_PUBLISHER=ON'
     '-DOT_PING_SENDER=ON'
     '-DOT_REFERENCE_DEVICE=ON'
@@ -134,6 +135,7 @@ readonly OT_CLANG_TIDY_CHECKS="\
 google-explicit-constructor,\
 google-readability-casting,\
 misc-unused-using-decls,\
+modernize-loop-convert,\
 modernize-use-bool-literals,\
 modernize-use-equals-default,\
 modernize-use-equals-delete,\
@@ -142,6 +144,7 @@ readability-avoid-const-params-in-decls,\
 readability-else-after-return,\
 readability-inconsistent-declaration-parameter-name,\
 readability-make-member-function-const,\
+readability-redundant-control-flow,\
 readability-redundant-member-init,\
 readability-simplify-boolean-expr,\
 readability-static-accessed-through-instance,\

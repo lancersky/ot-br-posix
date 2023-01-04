@@ -604,7 +604,9 @@ protected:
     uint16_t        mDiscoveryScanPanId;
 
 #if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
+#if OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
     Tasklet         mHandlePendingCommandsTask;
+#endif
 #endif
     Tasklet         mUpdateChangedPropsTask;
     uint32_t        mThreadChangedFlags;

@@ -30,19 +30,15 @@ name: Toranj
 
 on: [push, pull_request]
 
-jobs:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (github.repository == 'openthread/openthread' && github.run_id) || github.ref }}
+  cancel-in-progress: true
 
-  cancel-previous-runs:
-    runs-on: ubuntu-20.04
-    steps:
-    - uses: rokroskar/workflow-run-cleanup-action@master
-      env:
-        GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-      if: "github.ref != 'refs/heads/main'"
+jobs:
 
   toranj-ncp:
     name: toranj-ncp-${{ matrix.TORANJ_RADIO }}
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +47,7 @@ jobs:
       COVERAGE: 1
       TORANJ_RADIO : ${{ matrix.TORANJ_RADIO }}
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: true
     - name: Bootstrap
@@ -61,11 +57,14 @@ jobs:
         sudo rm /etc/apt/sources.list.d/* && sudo apt-get update
         sudo apt-get --no-install-recommends install -y dbus libdbus-1-dev
         sudo apt-get --no-install-recommends install -y autoconf-archive
-        sudo apt-get --no-install-recommends install -y bsdtar
+        sudo apt-get --no-install-recommends install -y libarchive-tools
         sudo apt-get --no-install-recommends install -y libtool
         sudo apt-get --no-install-recommends install -y libglib2.0-dev
-        sudo apt-get --no-install-recommends install -y libboost-dev libboost-signals-dev
         sudo apt-get --no-install-recommends install -y lcov
+
+        sudo add-apt-repository universe
+        sudo apt-get update
+        sudo apt-get --no-install-recommends install -y libboost-all-dev python2
 
         script/git-tool clone --depth=1 --branch=master https://github.com/openthread/wpantund.git
         cd wpantund
@@ -80,7 +79,7 @@ jobs:
       if: "matrix.TORANJ_RADIO != 'multi'"
       run: |
         ./script/test generate_coverage gcc
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v3
       if: "matrix.TORANJ_RADIO != 'multi'"
       with:
         name: cov-toranj-ncp-${{ matrix.TORANJ_RADIO }}
@@ -88,7 +87,7 @@ jobs:
 
   toranj-cli:
     name: toranj-cli-${{ matrix.TORANJ_RADIO }}
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     strategy:
       matrix:
         TORANJ_RADIO: ['15.4']
@@ -97,7 +96,7 @@ jobs:
       TORANJ_RADIO : ${{ matrix.TORANJ_RADIO }}
       TORANJ_CLI: 1
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: true
     - name: Bootstrap
@@ -114,19 +113,40 @@ jobs:
       if: "matrix.TORANJ_RADIO != 'multi'"
       run: |
         ./script/test generate_coverage gcc
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v3
       if: "matrix.TORANJ_RADIO != 'multi'"
       with:
         name: cov-toranj-cli-${{ matrix.TORANJ_RADIO }}
         path: tmp/coverage.info
 
+  toranj-unittest:
+    name: toranj-unittest
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: true
+    - name: Bootstrap
+      env:
+        GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      run: |
+        sudo dpkg --add-architecture i386
+        sudo apt-get update
+        sudo apt-get --no-install-recommends install -y clang-10 clang++-10 ninja-build python3-setuptools python3-wheel llvm lcov
+        sudo apt-get --no-install-recommends install -y g++-multilib libreadline-dev:i386 libncurses-dev:i386
+        python3 -m pip install -r tests/scripts/thread-cert/requirements.txt
+    - name: Build & Run
+      run: |
+        ./tests/toranj/build.sh cmake
+        ninja test
+
   upload-coverage:
     needs:
     - toranj-ncp
     - toranj-cli
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: true
     - name: Bootstrap
@@ -148,7 +168,7 @@ jobs:
     needs: upload-coverage
     runs-on: ubuntu-20.04
     steps:
-    - uses: geekyeggo/delete-artifact@1-glob-support
+    - uses: geekyeggo/delete-artifact@v2
       with:
         name: cov-*
         useGlob: true

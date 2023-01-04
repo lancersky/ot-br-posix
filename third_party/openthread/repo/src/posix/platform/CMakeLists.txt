@@ -35,6 +35,14 @@ if(OT_DAEMON)
     target_compile_definitions(ot-posix-config
         INTERFACE "OPENTHREAD_POSIX_CONFIG_DAEMON_ENABLE=1"
     )
+
+    # We have to add this definition to `ot-config` because openthread core
+    # libraries will set config file to "openthrad-core-posix-config.h" which
+    # depends on `OPENTHREAD_POSIX_CONFIG_DAEMON_ENABLE` to correctly enable
+    # PLATFORM_NETIF and PLATFORM_UDP features. Otherwise, openthread core and
+    # posix libraries will use different feature definitions.
+    list(APPEND OT_PLATFORM_DEFINES "OPENTHREAD_POSIX_CONFIG_DAEMON_ENABLE=1")
+    set(OT_PLATFORM_DEFINES ${OT_PLATFORM_DEFINES} PARENT_SCOPE)
 endif()
 
 option(OT_POSIX_INSTALL_EXTERNAL_ROUTES "Install External Routes as IPv6 routes" ON)
@@ -76,13 +84,30 @@ if(OT_POSIX_CONFIG_RCP_BUS)
     )
 endif()
 
+set(OT_POSIX_NAT64_CIDR "192.168.255.0/24" CACHE STRING "NAT64 CIDR for OpenThread NAT64")
+if(OT_POSIX_NAT64_CIDR)
+    target_compile_definitions(ot-posix-config
+        INTERFACE "OPENTHREAD_POSIX_CONFIG_NAT64_CIDR=\"${OT_POSIX_NAT64_CIDR}\""
+    )
+endif()
+
 if(NOT OT_CONFIG)
     set(OT_CONFIG "openthread-core-posix-config.h" PARENT_SCOPE)
+endif()
+
+set(OT_POSIX_CONFIG_RCP_VENDOR_INTERFACE "vendor_interface_example.cpp"
+       CACHE STRING "vendor interface implementation")
+
+set(CMAKE_EXE_LINKER_FLAGS "-rdynamic ${CMAKE_EXE_LINKER_FLAGS}" PARENT_SCOPE)
+
+if(OT_ANDROID_NDK)
+    target_compile_options(ot-posix-config INTERFACE -Wno-sign-compare)
 endif()
 
 add_library(openthread-posix
     alarm.cpp
     backbone.cpp
+    backtrace.cpp
     daemon.cpp
     entropy.cpp
     firewall.cpp
@@ -103,6 +128,7 @@ add_library(openthread-posix
     udp.cpp
     utils.cpp
     virtual_time.cpp
+    ${OT_POSIX_CONFIG_RCP_VENDOR_INTERFACE}
 )
 
 target_link_libraries(openthread-posix
@@ -110,11 +136,20 @@ target_link_libraries(openthread-posix
         openthread-platform
     PRIVATE
         openthread-url
+        ot-config-ftd
         ot-config
         ot-posix-config
-        util
+        $<$<NOT:$<BOOL:${OT_ANDROID_NDK}>>:util>
         $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Linux>:rt>
 )
+
+option(OT_TARGET_OPENWRT "enable openthread posix for OpenWRT" OFF)
+if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux" AND NOT OT_TARGET_OPENWRT)
+    target_compile_definitions(ot-posix-config
+        INTERFACE "OPENTHREAD_POSIX_CONFIG_NAT64_AIL_PREFIX_ENABLE=1"
+    )
+    target_link_libraries(openthread-posix PRIVATE anl)
+endif()
 
 target_compile_definitions(openthread-posix
     PUBLIC
@@ -138,10 +173,30 @@ target_include_directories(openthread-posix PRIVATE
 )
 
 if(OT_POSIX_CONFIG_RCP_BUS MATCHES "CPC")
+    set(CPCD_SOURCE_DIR "" CACHE STRING "Location of cpc daemon project")
+    CHECK_INCLUDE_FILE(sl_cpc.h CPC_HEADER_FOUND)
+    if (NOT CPC_HEADER_FOUND)
+        message(STATUS "CPC is not installed.")
+        if (NOT CPCD_SOURCE_DIR)
+            message(FATAL_ERROR "Could not locate CPC daemon sources.\n"
+                                "Please define the CMake variable 'CPCD_SOURCE_DIR'.\n"
+                                "'CPCD_SOURCE_DIR' is an absolute path to the CPC Daemon sources")
+        endif()
+
+        message(STATUS  "Building cpc library from source...\n"
+                        "    CPCD_SOURCE_DIR = ${CPCD_SOURCE_DIR}")
+        if (NOT IS_ABSOLUTE ${CPCD_SOURCE_DIR})
+            message(FATAL_ERROR "'CPCD_SOURCE_DIR' must be an absolute path.\nCPCD_SOURCE_DIR=\"${CPCD_SOURCE_DIR}\"")
+        endif()
+
+        # Add cpcd to the build tree
+        add_subdirectory(${CPCD_SOURCE_DIR} ${CPCD_SOURCE_DIR}/build)
+        target_include_directories(openthread-posix PRIVATE
+            ${CPCD_SOURCE_DIR}/lib
+        )
+    endif()
+
     target_sources(openthread-posix PRIVATE cpc_interface.cpp)
     target_link_libraries(openthread-posix PRIVATE cpc)
-    target_include_directories(openthread-posix PRIVATE
-        ${PROJECT_SOURCE_DIR}/../../../platform/service/cpc/daemon/lib
-        ${PROJECT_SOURCE_DIR}/../../../platform/service/cpc/daemon/misc
-    )
+
 endif()

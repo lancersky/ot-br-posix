@@ -66,10 +66,14 @@ otbr_install()
         "-DBUILD_TESTING=OFF"
         "-DCMAKE_INSTALL_PREFIX=/usr"
         "-DOTBR_DBUS=ON"
+        "-DOTBR_FEATURE_FLAGS=ON"
         "-DOTBR_DNSSD_DISCOVERY_PROXY=ON"
         "-DOTBR_SRP_ADVERTISING_PROXY=ON"
         "-DOTBR_INFRA_IF_NAME=${INFRA_IF_NAME}"
         "-DOTBR_MDNS=${OTBR_MDNS:=mDNSResponder}"
+        # Force re-evaluation of version strings
+        "-DOTBR_VERSION="
+        "-DOT_PACKAGE_VERSION="
         "${otbr_options[@]}"
     )
 
@@ -104,6 +108,13 @@ otbr_install()
             "-DOT_REFERENCE_DEVICE=ON"
             "-DOT_DHCP6_CLIENT=ON"
             "-DOT_DHCP6_SERVER=ON"
+        )
+    fi
+
+    if with NAT64 && [[ ${NAT64_SERVICE:-} == "openthread" ]]; then
+        otbr_options+=(
+            "-DOTBR_NAT64=ON"
+            "-DOT_POSIX_NAT64_CIDR=${NAT64_DYNAMIC_POOL:-192.168.255.0/24}"
         )
     fi
 

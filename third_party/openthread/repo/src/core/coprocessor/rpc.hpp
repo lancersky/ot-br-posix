@@ -155,14 +155,6 @@ public:
     void SetUserCommands(const Command aCommands[], uint8_t aLength, void *aContext);
 
     /**
-     * This method sets the user command error
-     *
-     * @param[in]  aError         An error
-     *
-     */
-    void SetUserCommandError(otError aError);
-
-    /**
      * Write a number of bytes to the output buffer as a hex string.
      *
      * @param[in]  aBytes   A pointer to data which should be printed.
@@ -286,7 +278,7 @@ public:
      */
     void OutputExtAddress(const otExtAddress &aExtAddress) { OutputBytes(aExtAddress.m8); }
 
-    void ProcessHelp(void *aContext, uint8_t aArgsLength, char *aArgs[]);
+    Error ProcessHelp(void *aContext, uint8_t aArgsLength, char *aArgs[]);
 
     char * GetStaticOutputBuffer(void)
     {
@@ -336,7 +328,6 @@ private:
 #if OPENTHREAD_COPROCESSOR
     const Command *mUserCommands;
     void *         mUserCommandsContext;
-    otError        mUserCommandsError;
     uint8_t        mUserCommandsLength;
     static char    mStaticOutputBuffer[kMaxStaticOutputBufferSize];
 #else

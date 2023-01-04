@@ -57,8 +57,7 @@ extern "C" Error otCRPCHandleCommand(void *             aContext,
         if (strcmp(aArgs[0], aCommands[i].mName) == 0)
         {
             // Command found, call command handler
-            (aCommands[i].mCommand)(aContext, aArgsLength - 1, (aArgsLength > 1) ? &aArgs[1] : nullptr);
-            error = kErrorNone;
+            error = (aCommands[i].mCommand)(aContext, aArgsLength - 1, (aArgsLength > 1) ? &aArgs[1] : nullptr);
             ExitNow();
         }
     }
@@ -72,11 +71,6 @@ exit:
 extern "C" void otCliAppendResult(otError aError)
 {
     RPC::GetRPC().OutputResult(aError);
-}
-
-extern "C" void otCliSetUserCommandError(otError aError)
-{
-    RPC::GetRPC().SetUserCommandError(aError);
 }
 
 extern "C" void otCliOutputBytes(const uint8_t *aBytes, uint8_t aLength)
@@ -116,9 +110,9 @@ extern "C" otError otCRPCProcessCmd(uint8_t aArgsLength, char *aArgs[], char *aO
 }
 
 #if OPENTHREAD_COPROCESSOR
-extern "C" void otCRPCProcessHelp(void *aContext, uint8_t aArgsLength, char *aArgs[])
+extern "C" otError otCRPCProcessHelp(void *aContext, uint8_t aArgsLength, char *aArgs[])
 {
-    RPC::GetRPC().ProcessHelp(aContext, aArgsLength, aArgs);
+    return RPC::GetRPC().ProcessHelp(aContext, aArgsLength, aArgs);
 }
 
 extern "C" void otCRPCSetUserCommands(const otCliCommand *aUserCommands, uint8_t aLength, void *aContext)

@@ -38,12 +38,14 @@ if(NOT DEFINED OT_PLATFORM_LIB_FTD)
 endif()
 
 target_link_libraries(ot-cli-ftd PRIVATE
+    $<$<BOOL:${OT_LINKER_MAP}>:-Wl,-Map=bin/ot-cli-ftd.map>
     openthread-cli-ftd
     ${OT_PLATFORM_LIB_FTD}
     openthread-ftd
     ${OT_PLATFORM_LIB_FTD}
     openthread-cli-ftd
     ${OT_MBEDTLS}
+    ot-config-ftd
     ot-config
 )
 

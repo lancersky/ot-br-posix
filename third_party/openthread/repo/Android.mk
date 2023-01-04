@@ -169,6 +169,7 @@ LOCAL_SRC_FILES                                                  := \
     src/core/api/backbone_router_ftd_api.cpp                        \
     src/core/api/border_agent_api.cpp                               \
     src/core/api/border_router_api.cpp                              \
+    src/core/api/border_routing_api.cpp                             \
     src/core/api/channel_manager_api.cpp                            \
     src/core/api/channel_monitor_api.cpp                            \
     src/core/api/child_supervision_api.cpp                          \
@@ -197,6 +198,7 @@ LOCAL_SRC_FILES                                                  := \
     src/core/api/logging_api.cpp                                    \
     src/core/api/message_api.cpp                                    \
     src/core/api/multi_radio_api.cpp                                \
+    src/core/api/nat64_api.cpp                                      \
     src/core/api/netdata_api.cpp                                    \
     src/core/api/netdata_publisher_api.cpp                          \
     src/core/api/netdiag_api.cpp                                    \
@@ -211,6 +213,7 @@ LOCAL_SRC_FILES                                                  := \
     src/core/api/srp_server_api.cpp                                 \
     src/core/api/tasklet_api.cpp                                    \
     src/core/api/tcp_api.cpp                                        \
+    src/core/api/tcp_ext_api.cpp                                    \
     src/core/api/thread_api.cpp                                     \
     src/core/api/thread_ftd_api.cpp                                 \
     src/core/api/trel_api.cpp                                       \
@@ -231,6 +234,8 @@ LOCAL_SRC_FILES                                                  := \
     src/core/common/crc16.cpp                                       \
     src/core/common/data.cpp                                        \
     src/core/common/error.cpp                                       \
+    src/core/common/frame_builder.cpp                               \
+    src/core/common/frame_data.cpp                                  \
     src/core/common/heap.cpp                                        \
     src/core/common/heap_data.cpp                                   \
     src/core/common/heap_string.cpp                                 \
@@ -252,7 +257,6 @@ LOCAL_SRC_FILES                                                  := \
     src/core/crypto/aes_ecb.cpp                                     \
     src/core/crypto/crypto_platform.cpp                             \
     src/core/crypto/ecdsa.cpp                                       \
-    src/core/crypto/ecdsa_tinycrypt.cpp                             \
     src/core/crypto/hkdf_sha256.cpp                                 \
     src/core/crypto/hmac_sha256.cpp                                 \
     src/core/crypto/mbedtls.cpp                                     \
@@ -298,12 +302,13 @@ LOCAL_SRC_FILES                                                  := \
     src/core/net/dns_types.cpp                                      \
     src/core/net/dnssd_server.cpp                                   \
     src/core/net/icmp6.cpp                                          \
-    src/core/net/ip4_address.cpp                                    \
+    src/core/net/ip4_types.cpp                                      \
     src/core/net/ip6.cpp                                            \
     src/core/net/ip6_address.cpp                                    \
     src/core/net/ip6_filter.cpp                                     \
     src/core/net/ip6_headers.cpp                                    \
     src/core/net/ip6_mpl.cpp                                        \
+    src/core/net/nat64_translator.cpp                               \
     src/core/net/nd6.cpp                                            \
     src/core/net/nd_agent.cpp                                       \
     src/core/net/netif.cpp                                          \
@@ -312,6 +317,7 @@ LOCAL_SRC_FILES                                                  := \
     src/core/net/srp_client.cpp                                     \
     src/core/net/srp_server.cpp                                     \
     src/core/net/tcp6.cpp                                           \
+    src/core/net/tcp6_ext.cpp                                       \
     src/core/net/udp6.cpp                                           \
     src/core/radio/radio.cpp                                        \
     src/core/radio/radio_callbacks.cpp                              \
@@ -331,6 +337,7 @@ LOCAL_SRC_FILES                                                  := \
     src/core/thread/indirect_sender.cpp                             \
     src/core/thread/key_manager.cpp                                 \
     src/core/thread/link_metrics.cpp                                \
+    src/core/thread/link_metrics_types.cpp                          \
     src/core/thread/link_quality.cpp                                \
     src/core/thread/lowpan.cpp                                      \
     src/core/thread/mesh_forwarder.cpp                              \
@@ -380,6 +387,7 @@ LOCAL_SRC_FILES                                                  := \
     src/lib/url/url.cpp                                             \
     src/posix/platform/alarm.cpp                                    \
     src/posix/platform/backbone.cpp                                 \
+    src/posix/platform/backtrace.cpp                                \
     src/posix/platform/daemon.cpp                                   \
     src/posix/platform/entropy.cpp                                  \
     src/posix/platform/firewall.cpp                                 \
@@ -399,6 +407,46 @@ LOCAL_SRC_FILES                                                  := \
     src/posix/platform/trel.cpp                                     \
     src/posix/platform/udp.cpp                                      \
     src/posix/platform/utils.cpp                                    \
+    third_party/tcplp/bsdtcp/tcp_usrreq.c                           \
+    third_party/tcplp/bsdtcp/tcp_subr.c                             \
+    third_party/tcplp/bsdtcp/tcp_output.c                           \
+    third_party/tcplp/bsdtcp/cc/cc_newreno.c                        \
+    third_party/tcplp/bsdtcp/tcp_reass.c                            \
+    third_party/tcplp/bsdtcp/tcp_timewait.c                         \
+    third_party/tcplp/bsdtcp/tcp_sack.c                             \
+    third_party/tcplp/bsdtcp/tcp_input.c                            \
+    third_party/tcplp/bsdtcp/tcp_timer.c                            \
+    third_party/tcplp/lib/bitmap.c                                  \
+    third_party/tcplp/lib/cbuf.c                                    \
+    third_party/tcplp/lib/lbuf.c                                    \
+    $(OPENTHREAD_PROJECT_SRC_FILES)                                 \
+    $(NULL)
+
+include $(BUILD_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+
+LOCAL_MODULE := libopenthread-mbedtls
+LOCAL_MODULE_TAGS := eng
+LOCAL_C_INCLUDES                                         := \
+    $(OPENTHREAD_PROJECT_INCLUDES)                          \
+    $(LOCAL_PATH)/include                                   \
+    $(LOCAL_PATH)/src                                       \
+    $(LOCAL_PATH)/src/cli                                   \
+    $(LOCAL_PATH)/src/core                                  \
+    $(LOCAL_PATH)/src/posix/platform                        \
+    $(LOCAL_PATH)/src/posix/platform/include                \
+    $(LOCAL_PATH)/third_party/mbedtls                       \
+    $(LOCAL_PATH)/third_party/mbedtls/repo/include          \
+    $(NULL)
+
+LOCAL_CFLAGS                     := \
+    -std=c99                        \
+    $(OPENTHREAD_PUBLIC_CFLAGS)     \
+    $(OPENTHREAD_PRIVATE_CFLAGS)    \
+    $(OPENTHREAD_PROJECT_CFLAGS)    \
+
+LOCAL_SRC_FILES                                                  := \
     third_party/mbedtls/repo/library/aes.c                          \
     third_party/mbedtls/repo/library/aesni.c                        \
     third_party/mbedtls/repo/library/arc4.c                         \
@@ -486,20 +534,6 @@ LOCAL_SRC_FILES                                                  := \
     third_party/mbedtls/repo/library/x509write_crt.c                \
     third_party/mbedtls/repo/library/x509write_csr.c                \
     third_party/mbedtls/repo/library/xtea.c                         \
-    third_party/tcplp/bsdtcp/tcp_usrreq.c                           \
-    third_party/tcplp/bsdtcp/tcp_subr.c                             \
-    third_party/tcplp/bsdtcp/tcp_output.c                           \
-    third_party/tcplp/bsdtcp/cc/cc_newreno.c                        \
-    third_party/tcplp/bsdtcp/tcp_reass.c                            \
-    third_party/tcplp/bsdtcp/tcp_timewait.c                         \
-    third_party/tcplp/bsdtcp/tcp_sack.c                             \
-    third_party/tcplp/bsdtcp/tcp_input.c                            \
-    third_party/tcplp/bsdtcp/tcp_timer.c                            \
-    third_party/tcplp/lib/bitmap.c                                  \
-    third_party/tcplp/lib/cbuf.c                                    \
-    third_party/tcplp/lib/lbuf.c                                    \
-    $(OPENTHREAD_PROJECT_SRC_FILES)                                 \
-    $(NULL)
 
 include $(BUILD_STATIC_LIBRARY)
 
@@ -582,8 +616,10 @@ LOCAL_CPPFLAGS                                                              := \
     $(NULL)
 
 LOCAL_LDLIBS                               := \
+    -lanl                                     \
     -lrt                                      \
-    -lutil
+    -lutil                                    \
+    -rdynamic                                 \
 
 LOCAL_SRC_FILES                            := \
     src/posix/cli_readline.cpp                \
@@ -591,7 +627,7 @@ LOCAL_SRC_FILES                            := \
     src/posix/main.c                          \
     $(NULL)
 
-LOCAL_STATIC_LIBRARIES = libopenthread-cli ot-core
+LOCAL_STATIC_LIBRARIES = libopenthread-cli ot-core libopenthread-mbedtls
 include $(BUILD_EXECUTABLE)
 
 ifeq ($(USE_OTBR_DAEMON), 1)

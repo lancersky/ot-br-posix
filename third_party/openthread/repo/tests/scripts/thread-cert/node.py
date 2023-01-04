@@ -51,6 +51,8 @@ import thread_cert
 
 PORT_OFFSET = int(os.getenv('PORT_OFFSET', "0"))
 
+INFRA_DNS64 = int(os.getenv('NAT64', 0))
+
 
 class OtbrDocker:
     RESET_DELAY = 3
@@ -107,13 +109,17 @@ class OtbrDocker:
         logging.info(f'Docker image: {config.OTBR_DOCKER_IMAGE}')
         subprocess.check_call(f"docker rm -f {self._docker_name} || true", shell=True)
         CI_ENV = os.getenv('CI_ENV', '').split()
+        dns = ['--dns=127.0.0.1'] if INFRA_DNS64 == 1 else []
+        nat64_prefix = ['--nat64-prefix', '2001:db8:1:ffff::/96'] if INFRA_DNS64 == 1 else []
         os.makedirs('/tmp/coverage/', exist_ok=True)
-        self._docker_proc = subprocess.Popen(['docker', 'run'] + CI_ENV + [
+
+        cmd = ['docker', 'run'] + CI_ENV + [
             '--rm',
             '--name',
             self._docker_name,
             '--network',
             config.BACKBONE_DOCKER_NETWORK_NAME,
+        ] + dns + [
             '-i',
             '--sysctl',
             'net.ipv6.conf.all.disable_ipv6=0 net.ipv4.conf.all.forwarding=1 net.ipv6.conf.all.forwarding=1',
@@ -128,10 +134,9 @@ class OtbrDocker:
             config.BACKBONE_IFNAME,
             '--trel-url',
             f'trel://{config.BACKBONE_IFNAME}',
-        ],
-                                             stdin=subprocess.DEVNULL,
-                                             stdout=sys.stdout,
-                                             stderr=sys.stderr)
+        ] + nat64_prefix
+        logging.info(' '.join(cmd))
+        self._docker_proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr)
 
         launch_docker_deadline = time.time() + 300
         launch_ok = False
@@ -987,7 +992,7 @@ class NodeImpl:
 
             addresses = lines.pop(0).strip().split('[')[1].strip(' ]').split(',')
             map(str.strip, addresses)
-            host['addresses'] = [addr for addr in addresses if addr]
+            host['addresses'] = [addr.strip() for addr in addresses if addr]
 
             host_list.append(host)
 
@@ -1018,6 +1023,8 @@ class NodeImpl:
                'priority': '0',
                'weight': '0',
                'ttl': '7200',
+               'lease': '7200',
+               'key-lease': '7200',
                'TXT': ['abc=010203'],
                'host_fullname': 'my-host.default.service.arpa.',
                'host': 'my-host',
@@ -1030,6 +1037,7 @@ class NodeImpl:
         cmd = 'srp server service'
         self.send_command(cmd)
         lines = self._expect_command_output()
+
         service_list = []
         while lines:
             service = {}
@@ -1044,8 +1052,8 @@ class NodeImpl:
                 service_list.append(service)
                 continue
 
-            # 'subtypes', port', 'priority', 'weight', 'ttl'
-            for i in range(0, 5):
+            # 'subtypes', port', 'priority', 'weight', 'ttl', 'lease', and 'key-lease'
+            for i in range(0, 7):
                 key_value = lines.pop(0).strip().split(':')
                 service[key_value[0].strip()] = key_value[1].strip()
 
@@ -1158,11 +1166,22 @@ class NodeImpl:
         self.send_command(f'srp client host address')
         self._expect_done()
 
-    def srp_client_add_service(self, instance_name, service_name, port, priority=0, weight=0, txt_entries=[]):
+    def srp_client_add_service(self,
+                               instance_name,
+                               service_name,
+                               port,
+                               priority=0,
+                               weight=0,
+                               txt_entries=[],
+                               lease=0,
+                               key_lease=0):
         txt_record = "".join(self._encode_txt_entry(entry) for entry in txt_entries)
+        if txt_record == '':
+            txt_record = '-'
         instance_name = self._escape_escapable(instance_name)
         self.send_command(
-            f'srp client service add {instance_name} {service_name} {port} {priority} {weight} {txt_record}')
+            f'srp client service add {instance_name} {service_name} {port} {priority} {weight} {txt_record} {lease} {key_lease}'
+        )
         self._expect_done()
 
     def srp_client_remove_service(self, instance_name, service_name):
@@ -1186,6 +1205,16 @@ class NodeImpl:
 
     def srp_client_get_lease_interval(self) -> int:
         cmd = 'srp client leaseinterval'
+        self.send_command(cmd)
+        return int(self._expect_result('\d+'))
+
+    def srp_client_set_key_lease_interval(self, leaseinterval: int):
+        cmd = f'srp client keyleaseinterval {leaseinterval}'
+        self.send_command(cmd)
+        self._expect_done()
+
+    def srp_client_get_key_lease_interval(self) -> int:
+        cmd = 'srp client keyleaseinterval'
         self.send_command(cmd)
         return int(self._expect_result('\d+'))
 
@@ -1988,6 +2017,118 @@ class NodeImpl:
         cmd = 'br nat64prefix'
         self.send_command(cmd)
         return self._expect_command_output()[0]
+
+    def get_br_favored_nat64_prefix(self):
+        cmd = 'br favorednat64prefix'
+        self.send_command(cmd)
+        return self._expect_command_output()[0].split(' ')[0]
+
+    def enable_nat64(self):
+        self.send_command(f'nat64 enable')
+        self._expect_done()
+
+    def disable_nat64(self):
+        self.send_command(f'nat64 disable')
+        self._expect_done()
+
+    def get_nat64_state(self):
+        self.send_command('nat64 state')
+        res = {}
+        for line in self._expect_command_output():
+            state = line.split(':')
+            res[state[0].strip()] = state[1].strip()
+        return res
+
+    def get_nat64_mappings(self):
+        cmd = 'nat64 mappings'
+        self.send_command(cmd)
+        result = self._expect_command_output()
+        session = None
+        session_counters = None
+        sessions = []
+
+        for line in result:
+            m = re.match(
+                r'\|\s+([a-f0-9]+)\s+\|\s+(.+)\s+\|\s+(.+)\s+\|\s+(\d+)s\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|',
+                line)
+            if m:
+                groups = m.groups()
+                if session:
+                    session['counters'] = session_counters
+                    sessions.append(session)
+                session = {
+                    'id': groups[0],
+                    'ip6': groups[1],
+                    'ip4': groups[2],
+                    'expiry': int(groups[3]),
+                }
+                session_counters = {}
+                session_counters['total'] = {
+                    '4to6': {
+                        'packets': int(groups[4]),
+                        'bytes': int(groups[5]),
+                    },
+                    '6to4': {
+                        'packets': int(groups[6]),
+                        'bytes': int(groups[7]),
+                    },
+                }
+                continue
+            if not session:
+                continue
+            m = re.match(r'\|\s+\|\s+(.+)\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|', line)
+            if m:
+                groups = m.groups()
+                session_counters[groups[0]] = {
+                    '4to6': {
+                        'packets': int(groups[1]),
+                        'bytes': int(groups[2]),
+                    },
+                    '6to4': {
+                        'packets': int(groups[3]),
+                        'bytes': int(groups[4]),
+                    },
+                }
+        if session:
+            session['counters'] = session_counters
+            sessions.append(session)
+        return sessions
+
+    def get_nat64_counters(self):
+        cmd = 'nat64 counters'
+        self.send_command(cmd)
+        result = self._expect_command_output()
+
+        protocol_counters = {}
+        error_counters = {}
+        for line in result:
+            m = re.match(r'\|\s+(.+)\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|', line)
+            if m:
+                groups = m.groups()
+                protocol_counters[groups[0]] = {
+                    '4to6': {
+                        'packets': int(groups[1]),
+                        'bytes': int(groups[2]),
+                    },
+                    '6to4': {
+                        'packets': int(groups[3]),
+                        'bytes': int(groups[4]),
+                    },
+                }
+                continue
+            m = re.match(r'\|\s+(.+)\s+\|\s+(\d+)\s+\|\s+(\d+)\s+\|', line)
+            if m:
+                groups = m.groups()
+                error_counters[groups[0]] = {
+                    '4to6': {
+                        'packets': int(groups[1]),
+                    },
+                    '6to4': {
+                        'packets': int(groups[2]),
+                    },
+                }
+                continue
+        return {'protocol': protocol_counters, 'errors': error_counters}
 
     def get_netdata_nat64_prefix(self):
         prefixes = []
@@ -2851,15 +2992,38 @@ class NodeImpl:
 
         return router_table
 
-    def link_metrics_query_single_probe(self, dst_addr: str, linkmetrics_flags: str):
-        cmd = 'linkmetrics query %s single %s' % (dst_addr, linkmetrics_flags)
+    def link_metrics_query_single_probe(self, dst_addr: str, linkmetrics_flags: str, block: str = ""):
+        cmd = 'linkmetrics query %s single %s %s' % (dst_addr, linkmetrics_flags, block)
         self.send_command(cmd)
-        self._expect_done()
+        self.simulator.go(5)
+        return self._parse_linkmetrics_query_result(self._expect_command_output())
 
-    def link_metrics_query_forward_tracking_series(self, dst_addr: str, series_id: int):
-        cmd = 'linkmetrics query %s forward %d' % (dst_addr, series_id)
+    def link_metrics_query_forward_tracking_series(self, dst_addr: str, series_id: int, block: str = ""):
+        cmd = 'linkmetrics query %s forward %d %s' % (dst_addr, series_id, block)
         self.send_command(cmd)
-        self._expect_done()
+        self.simulator.go(5)
+        return self._parse_linkmetrics_query_result(self._expect_command_output())
+
+    def _parse_linkmetrics_query_result(self, lines):
+        """Parse link metrics query result"""
+
+        # Exmaple of command output:
+        # ['Received Link Metrics Report from: fe80:0:0:0:146e:a00:0:1',
+        #  '- PDU Counter: 1 (Count/Summation)',
+        #  '- LQI: 0 (Exponential Moving Average)',
+        #  '- Margin: 80 (dB) (Exponential Moving Average)',
+        #  '- RSSI: -20 (dBm) (Exponential Moving Average)']
+        #
+        # Or 'Link Metrics Report, status: {status}'
+
+        result = {}
+        for line in lines:
+            if line.startswith('- '):
+                k, v = line[2:].split(': ')
+                result[k] = v.split(' ')[0]
+            elif line.startswith('Link Metrics Report, status: '):
+                result['Status'] = line[29:]
+        return result
 
     def link_metrics_mgmt_req_enhanced_ack_based_probing(self,
                                                          dst_addr: str,
@@ -3381,6 +3545,8 @@ class LinuxHost():
             fullname = f'{host_name}.local.'
             if fullname not in elements:
                 continue
+            if 'Add' not in elements:
+                continue
             addresses.append(elements[elements.index(fullname) + 1].split('%')[0])
 
         logging.debug(f'addresses of {host_name}: {addresses}')
@@ -3417,7 +3583,7 @@ class LinuxHost():
                 assert (service['host_fullname'] == f'{host_name}.local.')
                 service['host'] = host_name
                 service['addresses'] = addresses
-        return service if 'addresses' in service and service['addresses'] else None
+        return service or None
 
     def start_radvd_service(self, prefix, slaac):
         self.bash("""cat >/etc/radvd.conf <<EOF

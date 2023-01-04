@@ -30,15 +30,11 @@ name: OTCI
 
 on: [push, pull_request]
 
-jobs:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (github.repository == 'openthread/openthread' && github.run_id) || github.ref }}
+  cancel-in-progress: true
 
-  cancel-previous-runs:
-    runs-on: ubuntu-20.04
-    steps:
-    - uses: rokroskar/workflow-run-cleanup-action@master
-      env:
-        GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-      if: "github.ref != 'refs/heads/main'"
+jobs:
 
   cli-sim:
     name: cli-sim VIRTUAL_TIME=${{ matrix.virtual_time }}
@@ -52,7 +48,7 @@ jobs:
       VIRTUAL_TIME: ${{ matrix.virtual_time }}
       REAL_DEVICE: 0
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Bootstrap
       run: |
         sudo rm /etc/apt/sources.list.d/* && sudo apt-get update

@@ -213,17 +213,7 @@ Error RPC::ProcessCmd(uint8_t aArgsLength, char *aArgs[], char *aOutput, size_t 
     VerifyOrExit(kErrorNone !=
                  (error = HandleCommand(NULL, aArgsLength, aArgs, OT_ARRAY_LENGTH(sCommands), sCommands)));
 
-    // Check user commands
-    mUserCommandsError = OT_ERROR_NONE;
-
     error = HandleCommand(mUserCommandsContext, aArgsLength, aArgs, mUserCommandsLength, mUserCommands);
-
-    if (kErrorNone == error)
-    {
-        // User command executed. Check for error
-        error = mUserCommandsError;
-    }
-
 
 exit:
     if (OT_ERROR_NONE != error)
@@ -401,7 +391,7 @@ void RPC::OutputSpaces(uint8_t aCount)
     OutputFormat(format, "");
 }
 
-void RPC::ProcessHelp(void *aContext, uint8_t aArgsLength, char *aArgs[])
+Error RPC::ProcessHelp(void *aContext, uint8_t aArgsLength, char *aArgs[])
 {
     OT_UNUSED_VARIABLE(aContext);
     OT_UNUSED_VARIABLE(aArgsLength);
@@ -409,6 +399,8 @@ void RPC::ProcessHelp(void *aContext, uint8_t aArgsLength, char *aArgs[])
 
     OutputCommands(sCommands, OT_ARRAY_LENGTH(sCommands));
     OutputCommands(mUserCommands, mUserCommandsLength);
+    
+    return kErrorNone;
 }
 
 void RPC::SetOutputBuffer(char *aOutput, size_t aOutputMaxLen)
@@ -430,12 +422,6 @@ void RPC::SetUserCommands(const otCliCommand *aCommands, uint8_t aLength, void *
     mUserCommandsLength  = aLength;
     mUserCommandsContext = aContext;
 }
-
-void RPC::SetUserCommandError(otError aError)
-{
-    mUserCommandsError = aError;
-}
-
 
 #endif
 } // namespace Coprocessor

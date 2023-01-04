@@ -164,6 +164,8 @@ otError otLinkRawSrcMatchAddExtEntry(otInstance *aInstance, const otExtAddress *
     Error           error    = kErrorNone;
     Instance &      instance = AsCoreType(aInstance);
 
+    AssertPointerIsNotNull(aExtAddress);
+
     VerifyOrExit(instance.Get<Mac::LinkRaw>().IsEnabled(), error = kErrorInvalidState);
 
     address.Set(aExtAddress->m8, Mac::ExtAddress::kReverseByteOrder);
@@ -190,6 +192,8 @@ otError otLinkRawSrcMatchClearExtEntry(otInstance *aInstance, const otExtAddress
     Mac::ExtAddress address;
     Error           error    = kErrorNone;
     Instance &      instance = AsCoreType(aInstance);
+
+    AssertPointerIsNotNull(aExtAddress);
 
     VerifyOrExit(instance.Get<Mac::LinkRaw>().IsEnabled(), error = kErrorInvalidState);
 
@@ -293,6 +297,8 @@ uint16_t otLinkGetShortAddress(otInstance *aInstance)
 
 void otLinkGetFactoryAssignedIeeeEui64(otInstance *aInstance, otExtAddress *aEui64)
 {
+    AssertPointerIsNotNull(aEui64);
+
     otPlatRadioGetIeeeEui64(aInstance, aEui64->m8);
 }
 

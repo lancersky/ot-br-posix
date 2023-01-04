@@ -369,7 +369,7 @@ otError otPlatRadioAddSrcMatchExtEntry(otInstance *aInstance, const otExtAddress
     uint8_t iid = otNcpPlatGetCurCommandIid();
     entry       = findSrcMatchExtAvailEntry(iid);
 
-    otLogDebgPlat("Add ExtAddr: iid=%d, entry=%d, addr 0x%016x", iid, entry, aExtAddress->m8);
+    otLogDebgPlat("Add ExtAddr: iid=%d, entry=%d, addr %p", iid, entry, (void *) aExtAddress->m8);
 
     otEXPECT_ACTION(entry >= 0 && entry < RADIO_CONFIG_SRC_MATCH_EXT_ENTRY_NUM, error = OT_ERROR_NO_BUFS);
 

@@ -100,8 +100,8 @@ Mac::Mac(Instance &aInstance)
     , mActiveScanHandler(nullptr) // Initialize `mActiveScanHandler` and `mEnergyScanHandler` union
     , mScanHandlerContext(nullptr)
     , mLinks(aInstance)
-    , mOperationTask(aInstance, Mac::HandleOperationTask)
-    , mTimer(aInstance, Mac::HandleTimer)
+    , mOperationTask(aInstance)
+    , mTimer(aInstance)
     , mKeyIdMode2FrameCounter(0)
     , mCcaSampleCount(0)
 #if OPENTHREAD_CONFIG_MULTI_RADIO
@@ -348,7 +348,7 @@ void Mac::ReportEnergyScanResult(int8_t aRssi)
 {
     EnergyScanResult result;
 
-    VerifyOrExit((mEnergyScanHandler != nullptr) && (aRssi != kInvalidRssiValue));
+    VerifyOrExit((mEnergyScanHandler != nullptr) && (aRssi != Radio::kInvalidRssi));
 
     result.mChannel = mScanChannel;
     result.mMaxRssi = aRssi;
@@ -571,7 +571,7 @@ void Mac::UpdateIdleMode(void)
     else
     {
         mLinks.Receive(mRadioChannel);
-        LogDebg("Idle mode: Radio receiving on channel %d", mRadioChannel);
+        LogDebg("Idle mode: Radio receiving on channel %u", mRadioChannel);
     }
 
 exit:
@@ -606,11 +606,6 @@ void Mac::StartOperation(Operation aOperation)
     {
         mOperationTask.Post();
     }
-}
-
-void Mac::HandleOperationTask(Tasklet &aTasklet)
-{
-    aTasklet.Get<Mac>().PerformNextOperation();
 }
 
 void Mac::PerformNextOperation(void)
@@ -1033,10 +1028,8 @@ void Mac::BeginTransmit(void)
         // copy the frame into correct `TxFrame` for each radio type
         // (if it is not already prepared).
 
-        for (uint8_t index = 0; index < GetArrayLength(RadioTypes::kAllRadioTypes); index++)
+        for (RadioType radio : RadioTypes::kAllRadioTypes)
         {
-            RadioType radio = RadioTypes::kAllRadioTypes[index];
-
             if (txFrames.GetSelectedRadioTypes().Contains(radio))
             {
                 TxFrame &txFrame = txFrames.GetTxFrame(radio);
@@ -1052,10 +1045,8 @@ void Mac::BeginTransmit(void)
         // process security for each radio type separately. This
         // allows radio links to handle security differently, e.g.,
         // with different keys or link frame counters.
-        for (uint8_t index = 0; index < GetArrayLength(RadioTypes::kAllRadioTypes); index++)
+        for (RadioType radio : RadioTypes::kAllRadioTypes)
         {
-            RadioType radio = RadioTypes::kAllRadioTypes[index];
-
             if (txFrames.GetSelectedRadioTypes().Contains(radio))
             {
                 ProcessTransmitSecurity(txFrames.GetTxFrame(radio));
@@ -1453,11 +1444,6 @@ exit:
     return;
 }
 
-void Mac::HandleTimer(Timer &aTimer)
-{
-    aTimer.Get<Mac>().HandleTimer();
-}
-
 void Mac::HandleTimer(void)
 {
     switch (mOperation)
@@ -1516,7 +1502,7 @@ Error Mac::ProcessReceiveSecurity(RxFrame &aFrame, const Address &aSrcAddr, Neig
     VerifyOrExit(securityLevel == Frame::kSecEncMic32);
 
     IgnoreError(aFrame.GetFrameCounter(frameCounter));
-    LogDebg("Rx security - frame counter %u", frameCounter);
+    LogDebg("Rx security - frame counter %lu", ToUlong(frameCounter));
 
     IgnoreError(aFrame.GetKeyIdMode(keyIdMode));
 
@@ -1662,7 +1648,7 @@ Error Mac::ProcessEnhAckSecurity(TxFrame &aTxFrame, RxFrame &aAckFrame)
     VerifyOrExit(txKeyId == ackKeyId);
 
     IgnoreError(aAckFrame.GetFrameCounter(frameCounter));
-    LogDebg("Rx security - Ack frame counter %u", frameCounter);
+    LogDebg("Rx security - Ack frame counter %lu", ToUlong(frameCounter));
 
     IgnoreError(aAckFrame.GetSrcAddr(srcAddr));
 
@@ -1750,7 +1736,7 @@ void Mac::HandleReceivedFrame(RxFrame *aFrame, Error aError)
 
     IgnoreError(aFrame->GetSrcAddr(srcaddr));
     IgnoreError(aFrame->GetDstAddr(dstaddr));
-    neighbor = Get<NeighborTable>().FindNeighbor(srcaddr);
+    neighbor = !srcaddr.IsNone() ? Get<NeighborTable>().FindNeighbor(srcaddr) : nullptr;
 
     // Destination Address Filtering
     switch (dstaddr.GetType())
@@ -2134,6 +2120,11 @@ void Mac::ResetRetrySuccessHistogram()
 }
 #endif // OPENTHREAD_CONFIG_MAC_RETRY_SUCCESS_HISTOGRAM_ENABLE
 
+uint8_t Mac::ComputeLinkMargin(int8_t aRss) const
+{
+    return ot::ComputeLinkMargin(GetNoiseFloor(), aRss);
+}
+
 // LCOV_EXCL_START
 
 #if OT_SHOULD_LOG_AT(OT_LOG_LEVEL_INFO)
@@ -2214,7 +2205,7 @@ void Mac::LogFrameTxFailure(const TxFrame &aFrame, Error aError, uint8_t aRetryC
         uint8_t maxAttempts = aFrame.GetMaxFrameRetries() + 1;
         uint8_t curAttempt  = aWillRetx ? (aRetryCount + 1) : maxAttempts;
 
-        LogInfo("Frame tx attempt %d/%d failed, error:%s, %s", curAttempt, maxAttempts, ErrorToString(aError),
+        LogInfo("Frame tx attempt %u/%u failed, error:%s, %s", curAttempt, maxAttempts, ErrorToString(aError),
                 aFrame.ToInfoString().AsCString());
     }
     else
@@ -2267,27 +2258,24 @@ exit:
 #if OPENTHREAD_CONFIG_MAC_CSL_RECEIVER_ENABLE
 void Mac::UpdateCsl(void)
 {
-    uint16_t period;
-    uint8_t  channel;
-
-    VerifyOrExit(IsCslSupported());
-
-    period  = Get<Mle::Mle>().IsRxOnWhenIdle() ? 0 : GetCslPeriod();
-    channel = GetCslChannel() ? GetCslChannel() : mRadioChannel;
+    uint16_t period  = IsCslEnabled() ? GetCslPeriod() : 0;
+    uint8_t  channel = GetCslChannel() ? GetCslChannel() : mRadioChannel;
 
     if (mLinks.UpdateCsl(period, channel, Get<Mle::Mle>().GetParent().GetRloc16(),
                          &Get<Mle::Mle>().GetParent().GetExtAddress()))
     {
-        Get<DataPollSender>().RecalculatePollPeriod();
-        if (period)
+        if (Get<Mle::Mle>().IsChild())
         {
-            Get<Mle::Mle>().ScheduleChildUpdateRequest();
+            Get<DataPollSender>().RecalculatePollPeriod();
+
+            if (period != 0)
+            {
+                Get<Mle::Mle>().ScheduleChildUpdateRequest();
+            }
         }
+
         UpdateIdleMode();
     }
-
-exit:
-    return;
 }
 
 void Mac::SetCslChannel(uint8_t aChannel)
@@ -2335,9 +2323,9 @@ void Mac::ProcessCsl(const RxFrame &aFrame, const Address &aSrcAddr)
     child->SetCslSynchronized(true);
     child->SetCslLastHeard(TimerMilli::GetNow());
     child->SetLastRxTimestamp(aFrame.GetTimestamp());
-    LogDebg("Timestamp=%u Sequence=%u CslPeriod=%hu CslPhase=%hu TransmitPhase=%hu",
-            static_cast<uint32_t>(aFrame.GetTimestamp()), aFrame.GetSequence(), csl->GetPeriod(), csl->GetPhase(),
-            child->GetCslPhase());
+    LogDebg("Timestamp=%lu Sequence=%u CslPeriod=%u CslPhase=%u TransmitPhase=%u",
+            ToUlong(static_cast<uint32_t>(aFrame.GetTimestamp())), aFrame.GetSequence(), csl->GetPeriod(),
+            csl->GetPhase(), child->GetCslPhase());
 
     Get<CslTxScheduler>().Update();
 

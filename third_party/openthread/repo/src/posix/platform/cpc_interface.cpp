@@ -94,7 +94,7 @@ otError CpcInterface::Init(const Url::Url &aRadioUrl)
 
     mSockFd = cpc_open_endpoint(mHandle, &mEndpoint, mId, 1);
 
-    if (-1 == mSockFd)
+    if (mSockFd < 0)
     {
       otLogCritPlat("CPC endpoint open failed");
       error = OT_ERROR_FAILED;
@@ -158,7 +158,7 @@ void CpcInterface::Read(uint64_t aTimeoutUs)
         OT_ASSERT(ret == 0);
     }
 
-    bytesRead = cpc_read_endpoint(mEndpoint, buffer, sizeof(buffer), mReadFlags);
+    bytesRead = cpc_read_endpoint(mEndpoint, buffer, sizeof(buffer), CPC_ENDPOINT_READ_FLAG_NONE);
 
     if (bytesRead > 0)
     {
@@ -173,11 +173,11 @@ void CpcInterface::Read(uint64_t aTimeoutUs)
         mReceiveFrameCallback(mReceiveFrameContext);
 
     }
-    else if (errno == ECONNRESET)
+    else if (bytesRead == -ECONNRESET)
     {
         SetCpcResetReq(true);
     }
-    else if ((errno != EAGAIN) && (errno != EINTR))
+    else if ((bytesRead != -EAGAIN) && (bytesRead != -EINTR))
     {
         DieNow(OT_EXIT_ERROR_ERRNO);
     }
@@ -207,7 +207,7 @@ otError CpcInterface::Write(const uint8_t *aFrame, uint16_t aLength)
 
     while (aLength)
     {
-        ssize_t bytesWritten = cpc_write_endpoint(mEndpoint, aFrame, aLength, mWriteFlags | SL_CPC_FLAG_NON_BLOCK);
+        ssize_t bytesWritten = cpc_write_endpoint(mEndpoint, aFrame, aLength, CPC_ENDPOINT_WRITE_FLAG_NON_BLOCKING);
 
         if (bytesWritten == aLength)
         {
@@ -220,8 +220,8 @@ otError CpcInterface::Write(const uint8_t *aFrame, uint16_t aLength)
         }
         else if (bytesWritten < 0)
         {
-            VerifyOrExit((errno == EPIPE), SetCpcResetReq(true));
-            VerifyOrDie((errno == EAGAIN) || (errno == EWOULDBLOCK) || (errno == EINTR), OT_EXIT_ERROR_ERRNO);
+            VerifyOrExit((bytesWritten == -EPIPE), SetCpcResetReq(true));
+            VerifyOrDie((bytesWritten == -EAGAIN) || (bytesWritten == -EWOULDBLOCK) || (bytesWritten == -EINTR), OT_EXIT_ERROR_ERRNO);
         }
 
     }
@@ -287,7 +287,7 @@ void CpcInterface::CheckAndReInitCpc(void)
     mSockFd = cpc_open_endpoint(mHandle, &mEndpoint, mId, 1);
 
     //If the restart failed, exit.
-    VerifyOrDie(mSockFd != -1, OT_EXIT_ERROR_ERRNO);
+    VerifyOrDie(mSockFd >= 0, OT_EXIT_ERROR_ERRNO);
 
     otLogCritPlat("Restarted CPC successfully");
 

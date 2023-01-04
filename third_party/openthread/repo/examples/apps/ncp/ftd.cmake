@@ -38,12 +38,14 @@ if(NOT DEFINED OT_PLATFORM_LIB_FTD)
 endif()
 
 target_link_libraries(ot-ncp-ftd PRIVATE
+    $<$<BOOL:${OT_LINKER_MAP}>:-Wl,-Map=bin/ot-ncp-ftd.map>
     openthread-ncp-ftd
     ${OT_PLATFORM_LIB_FTD}
     openthread-ftd
     ${OT_PLATFORM_LIB_FTD}
     openthread-ncp-ftd
     ${OT_MBEDTLS}
+    ot-config-ftd
     ot-config
 )
 

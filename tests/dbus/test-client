@@ -37,7 +37,9 @@ on_exit()
 {
     local status=$?
 
-    sudo killall otbr-agent || true
+    if [[ -v OTBR_PID ]]; then
+        sudo kill "-${OTBR_PID}"
+    fi
     sudo killall expect || true
     sudo killall ot-cli-ftd || true
     sudo killall ot-cli-mtd || true
@@ -111,7 +113,8 @@ main()
 
     sleep 1
 
-    sudo "${CMAKE_BINARY_DIR}"/src/agent/otbr-agent -d7 -I wpan0 "spinel+hdlc+forkpty://$(command -v ot-rcp)?forkpty-arg=1" &
+    setsid sudo "${CMAKE_CURRENT_SOURCE_DIR}"/keep_running.sh "${CMAKE_BINARY_DIR}"/src/agent/otbr-agent -d7 -I wpan0 "spinel+hdlc+forkpty://$(command -v ot-rcp)?forkpty-arg=1" &
+    OTBR_PID=$!
     if ! (tail -f "${temp_dir}/dbus.out" &) | timeout 10s grep -q Ready; then
         cat "${temp_dir}/dbus.out"
         exit 1
@@ -125,11 +128,26 @@ main()
     rcp_version=$(sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl rcp version | grep -oE '^OPENTHREAD.*$' | tr -d '\r\n')
     thread_version=$(sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl thread version | grep -oE '^[0-9]+' | tr -d '\r\n')
 
+    local property_names="array:string:"
+    property_names+="OtHostVersion,"
+    property_names+="OtRcpVersion,"
+    property_names+="ThreadVersion,"
+    property_names+="Uptime,"
+    property_names+="RadioCoexMetrics,"
+    property_names+="RadioSpinelMetrics,"
+    property_names+="RcpInterfaceMetrics"
+    local result_pattern="\s+variant\s+string\s+\"${ot_version}\""
+    result_pattern+="\s+variant\s+string\s+\"${rcp_version}\""
+    result_pattern+="\s+variant\s+uint16\s+${thread_version}"
+    result_pattern+="\s+variant\s+uint64\s+\d+"                                                 # Uptime
+    result_pattern+="\s+variant\s+struct\s+{(\s+uint32\s+\d+){18}\s+boolean\s+(true|false)\s+}" # RadioCoexMetrics
+    result_pattern+="\s+variant\s+struct\s+{(\s+uint32\s+\d+){4}\s+}"                           # RadioSpinelMetrics
+    result_pattern+="\s+variant\s+struct\s+{\s+byte\s+\d+(\s+uint64\s+\d+){7}\s+}"              # RcpInterfaceMetrics
     sudo dbus-send --system --dest=io.openthread.BorderRouter.wpan0 --print-reply \
         /io/openthread/BorderRouter/wpan0 \
         io.openthread.BorderRouter.GetProperties \
-        array:string:OtHostVersion,OtRcpVersion,ThreadVersion \
-        | grep -oPz "\s+variant\s+string\s+\"${ot_version}\"\s+variant\s+string\s+\"${rcp_version}\"\s+variant\s+uint16\s+${thread_version}"
+        "${property_names}" \
+        | grep -oPz "${result_pattern}"
 
     sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl ifconfig up
     sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl thread start
@@ -290,6 +308,18 @@ EOF
 
     sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl dataset active | grep "Active Timestamp: 2"
     sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl networkkey | grep be3bd244ae6d997020a882a24a8040e2
+
+    sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl dataset init new
+    sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl dataset commit pending
+
+    sudo dbus-send --system --dest=io.openthread.BorderRouter.wpan0 \
+        --type=method_call --print-reply /io/openthread/BorderRouter/wpan0 \
+        io.openthread.BorderRouter.LeaveNetwork
+    sleep 10
+
+    sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl state | grep disabled
+    sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl dataset active | grep NotFound
+    sudo "${CMAKE_BINARY_DIR}"/third_party/openthread/repo/src/posix/ot-ctl dataset pending | grep NotFound
 }
 
 main "$@"

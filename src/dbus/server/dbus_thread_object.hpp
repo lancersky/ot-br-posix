@@ -103,6 +103,7 @@ private:
     void RemoveExternalRouteHandler(DBusRequest &aRequest);
     void UpdateMeshCopTxtHandler(DBusRequest &aRequest);
     void GetPropertiesHandler(DBusRequest &aRequest);
+    void LeaveNetworkHandler(DBusRequest &aRequest);
 
     void IntrospectHandler(DBusRequest &aRequest);
 
@@ -110,6 +111,7 @@ private:
     otError SetLegacyUlaPrefixHandler(DBusMessageIter &aIter);
     otError SetLinkModeHandler(DBusMessageIter &aIter);
     otError SetActiveDatasetTlvsHandler(DBusMessageIter &aIter);
+    otError SetFeatureFlagListDataHandler(DBusMessageIter &aIter);
     otError SetRadioRegionHandler(DBusMessageIter &aIter);
 
     otError GetLinkModeHandler(DBusMessageIter &aIter);
@@ -141,6 +143,7 @@ private:
     otError GetExternalRoutesHandler(DBusMessageIter &aIter);
     otError GetOnMeshPrefixesHandler(DBusMessageIter &aIter);
     otError GetActiveDatasetTlvsHandler(DBusMessageIter &aIter);
+    otError GetFeatureFlagListDataHandler(DBusMessageIter &aIter);
     otError GetRadioRegionHandler(DBusMessageIter &aIter);
     otError GetSrpServerInfoHandler(DBusMessageIter &aIter);
     otError GetMdnsTelemetryInfoHandler(DBusMessageIter &aIter);
@@ -148,6 +151,10 @@ private:
     otError GetOtHostVersionHandler(DBusMessageIter &aIter);
     otError GetOtRcpVersionHandler(DBusMessageIter &aIter);
     otError GetThreadVersionHandler(DBusMessageIter &aIter);
+    otError GetRadioSpinelMetricsHandler(DBusMessageIter &aIter);
+    otError GetRcpInterfaceMetricsHandler(DBusMessageIter &aIter);
+    otError GetUptimeHandler(DBusMessageIter &aIter);
+    otError GetRadioCoexMetrics(DBusMessageIter &aIter);
 
     void ReplyScanResult(DBusRequest &aRequest, otError aError, const std::vector<otActiveScanResult> &aResult);
     void ReplyEnergyScanResult(DBusRequest &aRequest, otError aError, const std::vector<otEnergyScanResult> &aResult);

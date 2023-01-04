@@ -45,6 +45,9 @@
 #include "dbus/common/constants.hpp"
 #include "dbus/server/dbus_agent.hpp"
 #include "dbus/server/dbus_thread_object.hpp"
+#if OTBR_ENABLE_FEATURE_FLAGS
+#include "proto/feature_flag.pb.h"
+#endif
 
 #if OTBR_ENABLE_LEGACY
 #include <ot-legacy-pairing-ext.h>
@@ -146,6 +149,8 @@ otbrError DBusThreadObject::Init(void)
                    std::bind(&DBusThreadObject::UpdateMeshCopTxtHandler, this, _1));
     RegisterMethod(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_GET_PROPERTIES_METHOD,
                    std::bind(&DBusThreadObject::GetPropertiesHandler, this, _1));
+    RegisterMethod(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_LEAVE_NETWORK_METHOD,
+                   std::bind(&DBusThreadObject::LeaveNetworkHandler, this, _1));
 
     RegisterMethod(DBUS_INTERFACE_INTROSPECTABLE, DBUS_INTROSPECT_METHOD,
                    std::bind(&DBusThreadObject::IntrospectHandler, this, _1));
@@ -158,6 +163,8 @@ otbrError DBusThreadObject::Init(void)
                                std::bind(&DBusThreadObject::SetLinkModeHandler, this, _1));
     RegisterSetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_ACTIVE_DATASET_TLVS,
                                std::bind(&DBusThreadObject::SetActiveDatasetTlvsHandler, this, _1));
+    RegisterSetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_FEATURE_FLAG_LIST_DATA,
+                               std::bind(&DBusThreadObject::SetFeatureFlagListDataHandler, this, _1));
     RegisterSetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_RADIO_REGION,
                                std::bind(&DBusThreadObject::SetRadioRegionHandler, this, _1));
 
@@ -222,6 +229,8 @@ otbrError DBusThreadObject::Init(void)
                                std::bind(&DBusThreadObject::GetOnMeshPrefixesHandler, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_ACTIVE_DATASET_TLVS,
                                std::bind(&DBusThreadObject::GetActiveDatasetTlvsHandler, this, _1));
+    RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_FEATURE_FLAG_LIST_DATA,
+                               std::bind(&DBusThreadObject::GetFeatureFlagListDataHandler, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_RADIO_REGION,
                                std::bind(&DBusThreadObject::GetRadioRegionHandler, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_SRP_SERVER_INFO,
@@ -236,6 +245,14 @@ otbrError DBusThreadObject::Init(void)
                                std::bind(&DBusThreadObject::GetOtRcpVersionHandler, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_THREAD_VERSION,
                                std::bind(&DBusThreadObject::GetThreadVersionHandler, this, _1));
+    RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_RADIO_SPINEL_METRICS,
+                               std::bind(&DBusThreadObject::GetRadioSpinelMetricsHandler, this, _1));
+    RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_RCP_INTERFACE_METRICS,
+                               std::bind(&DBusThreadObject::GetRcpInterfaceMetricsHandler, this, _1));
+    RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_UPTIME,
+                               std::bind(&DBusThreadObject::GetUptimeHandler, this, _1));
+    RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_RADIO_COEX_METRICS,
+                               std::bind(&DBusThreadObject::GetRadioCoexMetrics, this, _1));
 
     SuccessOrExit(error = Signal(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_SIGNAL_READY, std::make_tuple()));
 
@@ -1155,6 +1172,41 @@ exit:
     return error;
 }
 
+otError DBusThreadObject::SetFeatureFlagListDataHandler(DBusMessageIter &aIter)
+{
+#if OTBR_ENABLE_FEATURE_FLAGS
+    otError              error = OT_ERROR_NONE;
+    std::vector<uint8_t> data;
+    FeatureFlagList      featureFlagList;
+
+    VerifyOrExit(DBusMessageExtractFromVariant(&aIter, data) == OTBR_ERROR_NONE, error = OT_ERROR_INVALID_ARGS);
+    VerifyOrExit(featureFlagList.ParseFromString(std::string(data.begin(), data.end())), error = OT_ERROR_INVALID_ARGS);
+    VerifyOrExit((error = mNcp->ApplyFeatureFlagList(featureFlagList)) == OT_ERROR_NONE);
+exit:
+    return error;
+#else
+    OTBR_UNUSED_VARIABLE(aIter);
+    return OT_ERROR_NOT_IMPLEMENTED;
+#endif
+}
+
+otError DBusThreadObject::GetFeatureFlagListDataHandler(DBusMessageIter &aIter)
+{
+#if OTBR_ENABLE_FEATURE_FLAGS
+    otError              error                       = OT_ERROR_NONE;
+    const std::string    appliedFeatureFlagListBytes = mNcp->GetAppliedFeatureFlagListBytes();
+    std::vector<uint8_t> data(appliedFeatureFlagListBytes.begin(), appliedFeatureFlagListBytes.end());
+
+    VerifyOrExit(DBusMessageEncodeToVariant(&aIter, data) == OTBR_ERROR_NONE, error = OT_ERROR_INVALID_ARGS);
+
+exit:
+    return error;
+#else
+    OTBR_UNUSED_VARIABLE(aIter);
+    return OT_ERROR_NOT_IMPLEMENTED;
+#endif
+}
+
 otError DBusThreadObject::SetRadioRegionHandler(DBusMessageIter &aIter)
 {
     auto        threadHelper = mNcp->GetThreadHelper();
@@ -1420,11 +1472,114 @@ exit:
     return error;
 }
 
+otError DBusThreadObject::GetRadioSpinelMetricsHandler(DBusMessageIter &aIter)
+{
+    otError              error = OT_ERROR_NONE;
+    RadioSpinelMetrics   radioSpinelMetrics;
+    otRadioSpinelMetrics otRadioSpinelMetrics = *otSysGetRadioSpinelMetrics();
+
+    radioSpinelMetrics.mRcpTimeoutCount         = otRadioSpinelMetrics.mRcpTimeoutCount;
+    radioSpinelMetrics.mRcpUnexpectedResetCount = otRadioSpinelMetrics.mRcpUnexpectedResetCount;
+    radioSpinelMetrics.mRcpRestorationCount     = otRadioSpinelMetrics.mRcpRestorationCount;
+    radioSpinelMetrics.mSpinelParseErrorCount   = otRadioSpinelMetrics.mSpinelParseErrorCount;
+
+    VerifyOrExit(DBusMessageEncodeToVariant(&aIter, radioSpinelMetrics) == OTBR_ERROR_NONE,
+                 error = OT_ERROR_INVALID_ARGS);
+
+exit:
+    return error;
+}
+
+otError DBusThreadObject::GetRcpInterfaceMetricsHandler(DBusMessageIter &aIter)
+{
+    otError               error = OT_ERROR_NONE;
+    RcpInterfaceMetrics   rcpInterfaceMetrics;
+    otRcpInterfaceMetrics otRcpInterfaceMetrics = *otSysGetRcpInterfaceMetrics();
+
+    rcpInterfaceMetrics.mRcpInterfaceType             = otRcpInterfaceMetrics.mRcpInterfaceType;
+    rcpInterfaceMetrics.mTransferredFrameCount        = otRcpInterfaceMetrics.mTransferredFrameCount;
+    rcpInterfaceMetrics.mTransferredValidFrameCount   = otRcpInterfaceMetrics.mTransferredValidFrameCount;
+    rcpInterfaceMetrics.mTransferredGarbageFrameCount = otRcpInterfaceMetrics.mTransferredGarbageFrameCount;
+    rcpInterfaceMetrics.mRxFrameCount                 = otRcpInterfaceMetrics.mRxFrameCount;
+    rcpInterfaceMetrics.mRxFrameByteCount             = otRcpInterfaceMetrics.mRxFrameByteCount;
+    rcpInterfaceMetrics.mTxFrameCount                 = otRcpInterfaceMetrics.mTxFrameCount;
+    rcpInterfaceMetrics.mTxFrameByteCount             = otRcpInterfaceMetrics.mTxFrameByteCount;
+
+    VerifyOrExit(DBusMessageEncodeToVariant(&aIter, rcpInterfaceMetrics) == OTBR_ERROR_NONE,
+                 error = OT_ERROR_INVALID_ARGS);
+
+exit:
+    return error;
+}
+
+otError DBusThreadObject::GetUptimeHandler(DBusMessageIter &aIter)
+{
+    otError error = OT_ERROR_NONE;
+
+    VerifyOrExit(DBusMessageEncodeToVariant(&aIter, otInstanceGetUptime(mNcp->GetThreadHelper()->GetInstance())) ==
+                     OTBR_ERROR_NONE,
+                 error = OT_ERROR_INVALID_ARGS);
+
+exit:
+    return error;
+}
+
+otError DBusThreadObject::GetRadioCoexMetrics(DBusMessageIter &aIter)
+{
+    otError            error = OT_ERROR_NONE;
+    otRadioCoexMetrics otRadioCoexMetrics;
+    RadioCoexMetrics   radioCoexMetrics;
+
+    SuccessOrExit(error = otPlatRadioGetCoexMetrics(mNcp->GetInstance(), &otRadioCoexMetrics));
+
+    radioCoexMetrics.mNumGrantGlitch                     = otRadioCoexMetrics.mNumGrantGlitch;
+    radioCoexMetrics.mNumTxRequest                       = otRadioCoexMetrics.mNumTxRequest;
+    radioCoexMetrics.mNumTxGrantImmediate                = otRadioCoexMetrics.mNumTxGrantImmediate;
+    radioCoexMetrics.mNumTxGrantWait                     = otRadioCoexMetrics.mNumTxGrantWait;
+    radioCoexMetrics.mNumTxGrantWaitActivated            = otRadioCoexMetrics.mNumTxGrantWaitActivated;
+    radioCoexMetrics.mNumTxGrantWaitTimeout              = otRadioCoexMetrics.mNumTxGrantWaitTimeout;
+    radioCoexMetrics.mNumTxGrantDeactivatedDuringRequest = otRadioCoexMetrics.mNumTxGrantDeactivatedDuringRequest;
+    radioCoexMetrics.mNumTxDelayedGrant                  = otRadioCoexMetrics.mNumTxDelayedGrant;
+    radioCoexMetrics.mAvgTxRequestToGrantTime            = otRadioCoexMetrics.mAvgTxRequestToGrantTime;
+    radioCoexMetrics.mNumRxRequest                       = otRadioCoexMetrics.mNumRxRequest;
+    radioCoexMetrics.mNumRxGrantImmediate                = otRadioCoexMetrics.mNumRxGrantImmediate;
+    radioCoexMetrics.mNumRxGrantWait                     = otRadioCoexMetrics.mNumRxGrantWait;
+    radioCoexMetrics.mNumRxGrantWaitActivated            = otRadioCoexMetrics.mNumRxGrantWaitActivated;
+    radioCoexMetrics.mNumRxGrantWaitTimeout              = otRadioCoexMetrics.mNumRxGrantWaitTimeout;
+    radioCoexMetrics.mNumRxGrantDeactivatedDuringRequest = otRadioCoexMetrics.mNumRxGrantDeactivatedDuringRequest;
+    radioCoexMetrics.mNumRxDelayedGrant                  = otRadioCoexMetrics.mNumRxDelayedGrant;
+    radioCoexMetrics.mAvgRxRequestToGrantTime            = otRadioCoexMetrics.mAvgRxRequestToGrantTime;
+    radioCoexMetrics.mNumRxGrantNone                     = otRadioCoexMetrics.mNumRxGrantNone;
+    radioCoexMetrics.mStopped                            = otRadioCoexMetrics.mStopped;
+
+    VerifyOrExit(DBusMessageEncodeToVariant(&aIter, radioCoexMetrics) == OTBR_ERROR_NONE,
+                 error = OT_ERROR_INVALID_ARGS);
+
+exit:
+    return error;
+}
+
 void DBusThreadObject::ActiveDatasetChangeHandler(const otOperationalDatasetTlvs &aDatasetTlvs)
 {
     std::vector<uint8_t> value(aDatasetTlvs.mLength);
     std::copy(aDatasetTlvs.mTlvs, aDatasetTlvs.mTlvs + aDatasetTlvs.mLength, value.begin());
     SignalPropertyChanged(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_ACTIVE_DATASET_TLVS, value);
+}
+
+void DBusThreadObject::LeaveNetworkHandler(DBusRequest &aRequest)
+{
+    mNcp->GetThreadHelper()->DetachGracefully([aRequest, this](otError error) mutable {
+        SuccessOrExit(error);
+        SuccessOrExit(error = otInstanceErasePersistentInfo(mNcp->GetThreadHelper()->GetInstance()));
+
+    exit:
+        aRequest.ReplyOtResult(error);
+        if (error == OT_ERROR_NONE)
+        {
+            Flush();
+            exit(0);
+        }
+    });
 }
 
 static_assert(OTBR_SRP_SERVER_STATE_DISABLED == static_cast<uint8_t>(OT_SRP_SERVER_STATE_DISABLED),
