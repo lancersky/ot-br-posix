@@ -22,7 +22,7 @@
  <tr style="height: 56px;">
   <td id="projectalign" style="padding-left: 0.5em;">
    <div id="projectname">openthread-br
-   &#160;<span id="projectnumber">0.3.0-d3442f2</span>
+   &#160;<span id="projectnumber">0.3.0-902eb71</span>
    </div>
   </td>
  </tr>
@@ -67,8 +67,10 @@ $(function() {
 </div><!-- top -->
 <div class="header">
   <div class="summary">
+<a href="#nested-classes">Classes</a> &#124;
 <a href="#define-members">Macros</a> &#124;
-<a href="#enum-members">Enumerations</a>  </div>
+<a href="#enum-members">Enumerations</a> &#124;
+<a href="#func-members">Functions</a>  </div>
   <div class="headertitle">
 <div class="title">border_agent.cpp File Reference</div>  </div>
 </div><!--header-->
@@ -86,7 +88,10 @@ $(function() {
 <code>#include &lt;random&gt;</code><br />
 <code>#include &lt;sstream&gt;</code><br />
 <code>#include &lt;openthread/border_agent.h&gt;</code><br />
+<code>#include &lt;openthread/border_routing.h&gt;</code><br />
+<code>#include &lt;openthread/random_noncrypto.h&gt;</code><br />
 <code>#include &lt;openthread/thread_ftd.h&gt;</code><br />
+<code>#include &lt;openthread/platform/settings.h&gt;</code><br />
 <code>#include &lt;openthread/platform/toolchain.h&gt;</code><br />
 <code>#include &quot;<a class="el" href="../../d6/d8f/uris_8hpp_source.html">agent/uris.hpp</a>&quot;</code><br />
 <code>#include &quot;<a class="el" href="../../d9/d9a/ncp__openthread_8hpp_source.html">ncp/ncp_openthread.hpp</a>&quot;</code><br />
@@ -97,6 +102,11 @@ $(function() {
 <code>#include &quot;common/types.hpp&quot;</code><br />
 <code>#include &quot;<a class="el" href="../../df/d51/hex_8hpp_source.html">utils/hex.hpp</a>&quot;</code><br />
 </div><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a name="nested-classes"></a>
+Classes</h2></td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="../../db/df3/structotbr_1_1StateBitmap.html">otbr::StateBitmap</a></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 class="groupheader"><a name="define-members"></a>
 Macros</h2></td></tr>
 <tr class="memitem:abd93e762dbf58b7d5c91966ee1c3412a"><td class="memItemLeft" align="right" valign="top"><a id="abd93e762dbf58b7d5c91966ee1c3412a"></a>
@@ -109,6 +119,34 @@ Enumerations</h2></td></tr>
 , <a class="el" href="../../d1/dbe/border__agent_8cpp.html#a2dc5a22425d3617a814d09f171382feba5165d1d4a5c9a22fa7424af418198d90">otbr::kInvalidLocator</a> = 0xffff
  }</td></tr>
 <tr class="separator:a2dc5a22425d3617a814d09f171382feb"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a81b4ac11a15b9d4cbad773198110f61b"><td class="memItemLeft" align="right" valign="top"><a id="a81b4ac11a15b9d4cbad773198110f61b"></a>enum &#160;</td><td class="memItemRight" valign="bottom">: uint8_t { <br />
+&#160;&#160;<b>kConnectionModeDisabled</b> = 0
+, <b>kConnectionModePskc</b> = 1
+, <b>kConnectionModePskd</b> = 2
+, <b>kConnectionModeVendor</b> = 3
+, <br />
+&#160;&#160;<b>kConnectionModeX509</b> = 4
+<br />
+ }</td></tr>
+<tr class="separator:a81b4ac11a15b9d4cbad773198110f61b"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a2c452cd743ad6f51e1982b01f338e42e"><td class="memItemLeft" align="right" valign="top"><a id="a2c452cd743ad6f51e1982b01f338e42e"></a>enum &#160;</td><td class="memItemRight" valign="bottom">: uint8_t { <b>kThreadIfStatusNotInitialized</b> = 0
+, <b>kThreadIfStatusInitialized</b> = 1
+, <b>kThreadIfStatusActive</b> = 2
+ }</td></tr>
+<tr class="separator:a2c452cd743ad6f51e1982b01f338e42e"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a61473d23c69f1b8bb26300ff9bd31357"><td class="memItemLeft" align="right" valign="top"><a id="a61473d23c69f1b8bb26300ff9bd31357"></a>enum &#160;</td><td class="memItemRight" valign="bottom">: uint8_t { <b>kAvailabilityInfrequent</b> = 0
+, <b>kAvailabilityHigh</b> = 1
+ }</td></tr>
+<tr class="separator:a61473d23c69f1b8bb26300ff9bd31357"><td class="memSeparator" colspan="2">&#160;</td></tr>
+</table><table class="memberdecls">
+<tr class="heading"><td colspan="2"><h2 class="groupheader"><a name="func-members"></a>
+Functions</h2></td></tr>
+<tr class="memitem:af1caba8f44d93a0b8a9a25060daa2e59"><td class="memItemLeft" align="right" valign="top"><a id="af1caba8f44d93a0b8a9a25060daa2e59"></a>
+StateBitmap&#160;</td><td class="memItemRight" valign="bottom"><b>otbr::GetStateBitmap</b> (otInstance &amp;aInstance)</td></tr>
+<tr class="separator:af1caba8f44d93a0b8a9a25060daa2e59"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a46c38e4eb19508dd955c6a53bc139554"><td class="memItemLeft" align="right" valign="top"><a id="a46c38e4eb19508dd955c6a53bc139554"></a>
+void&#160;</td><td class="memItemRight" valign="bottom"><b>otbr::AppendActiveTimestampTxtEntry</b> (otInstance &amp;aInstance, Mdns::Publisher::TxtList &amp;aTxtList)</td></tr>
+<tr class="separator:a46c38e4eb19508dd955c6a53bc139554"><td class="memSeparator" colspan="2">&#160;</td></tr>
 </table>
 <a name="details" id="details"></a><h2 class="groupheader">Detailed Description</h2>
 <div class="textblock"><p>The file implements the Thread border agent. </p>

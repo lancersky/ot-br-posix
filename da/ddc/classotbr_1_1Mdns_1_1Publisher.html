@@ -22,7 +22,7 @@
  <tr style="height: 56px;">
   <td id="projectalign" style="padding-left: 0.5em;">
    <div id="projectname">openthread-br
-   &#160;<span id="projectnumber">0.3.0-d3442f2</span>
+   &#160;<span id="projectnumber">0.3.0-902eb71</span>
    </div>
   </td>
  </tr>
@@ -193,12 +193,12 @@ using&#160;</td><td class="memItemRight" valign="bottom"><b>HostRegistrationMap<
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 class="groupheader"><a name="pro-methods"></a>
 Protected Member Functions</h2></td></tr>
-<tr class="memitem:a53fba5688a7e1c9c4407e20ce68d6a49"><td class="memItemLeft" align="right" valign="top"><a id="a53fba5688a7e1c9c4407e20ce68d6a49"></a>
-virtual void&#160;</td><td class="memItemRight" valign="bottom"><b>PublishServiceImpl</b> (const std::string &amp;aHostName, const std::string &amp;aName, const std::string &amp;aType, const SubTypeList &amp;aSubTypeList, uint16_t aPort, const TxtList &amp;aTxtList, <a class="el" href="../../da/ddc/classotbr_1_1Mdns_1_1Publisher.html#a80beefc2c41ca4779bb2e592e1de1da2">ResultCallback</a> &amp;&amp;aCallback)=0</td></tr>
-<tr class="separator:a53fba5688a7e1c9c4407e20ce68d6a49"><td class="memSeparator" colspan="2">&#160;</td></tr>
-<tr class="memitem:a31f434252aa9dace38a52d58ccb156dd"><td class="memItemLeft" align="right" valign="top"><a id="a31f434252aa9dace38a52d58ccb156dd"></a>
-virtual void&#160;</td><td class="memItemRight" valign="bottom"><b>PublishHostImpl</b> (const std::string &amp;aName, const std::vector&lt; <a class="el" href="../../d2/dfe/classotbr_1_1Ip6Address.html">Ip6Address</a> &gt; &amp;aAddresses, <a class="el" href="../../da/ddc/classotbr_1_1Mdns_1_1Publisher.html#a80beefc2c41ca4779bb2e592e1de1da2">ResultCallback</a> &amp;&amp;aCallback)=0</td></tr>
-<tr class="separator:a31f434252aa9dace38a52d58ccb156dd"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a7937cc90bed35fa9ffeddff9b5d02ab9"><td class="memItemLeft" align="right" valign="top"><a id="a7937cc90bed35fa9ffeddff9b5d02ab9"></a>
+virtual <a class="el" href="../../dc/d53/common_2types_8hpp.html#a9addd74a14dca1dab1b3e7a8205455aa">otbrError</a>&#160;</td><td class="memItemRight" valign="bottom"><b>PublishServiceImpl</b> (const std::string &amp;aHostName, const std::string &amp;aName, const std::string &amp;aType, const SubTypeList &amp;aSubTypeList, uint16_t aPort, const TxtList &amp;aTxtList, <a class="el" href="../../da/ddc/classotbr_1_1Mdns_1_1Publisher.html#a80beefc2c41ca4779bb2e592e1de1da2">ResultCallback</a> &amp;&amp;aCallback)=0</td></tr>
+<tr class="separator:a7937cc90bed35fa9ffeddff9b5d02ab9"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:ad9b9fb41b10ea56553a8547f5999515c"><td class="memItemLeft" align="right" valign="top"><a id="ad9b9fb41b10ea56553a8547f5999515c"></a>
+virtual <a class="el" href="../../dc/d53/common_2types_8hpp.html#a9addd74a14dca1dab1b3e7a8205455aa">otbrError</a>&#160;</td><td class="memItemRight" valign="bottom"><b>PublishHostImpl</b> (const std::string &amp;aName, const std::vector&lt; <a class="el" href="../../d2/dfe/classotbr_1_1Ip6Address.html">Ip6Address</a> &gt; &amp;aAddresses, <a class="el" href="../../da/ddc/classotbr_1_1Mdns_1_1Publisher.html#a80beefc2c41ca4779bb2e592e1de1da2">ResultCallback</a> &amp;&amp;aCallback)=0</td></tr>
+<tr class="separator:ad9b9fb41b10ea56553a8547f5999515c"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a2dfa77723d04cffdf04bec42c6dd0f6f"><td class="memItemLeft" align="right" valign="top"><a id="a2dfa77723d04cffdf04bec42c6dd0f6f"></a>
 virtual void&#160;</td><td class="memItemRight" valign="bottom"><b>OnServiceResolveFailedImpl</b> (const std::string &amp;aType, const std::string &amp;aInstanceName, int32_t aErrorCode)=0</td></tr>
 <tr class="separator:a2dfa77723d04cffdf04bec42c6dd0f6f"><td class="memSeparator" colspan="2">&#160;</td></tr>
@@ -797,7 +797,7 @@ static constexpr uint8_t&#160;</td><td class="memItemRight" valign="bottom"><b>k
 <dl class="params"><dt>Parameters</dt><dd>
   <table class="params">
     <tr><td class="paramdir">[in]</td><td class="paramname">aHostName</td><td>The name of the host which this service resides on. If an empty string is provided, this service resides on local host and it is the implementation to provide specific host name. Otherwise, the caller MUST publish the host with method PublishHost. </td></tr>
-    <tr><td class="paramdir">[in]</td><td class="paramname">aName</td><td>The name of this service. </td></tr>
+    <tr><td class="paramdir">[in]</td><td class="paramname">aName</td><td>The name of this service. If an empty string is provided, the service's name will be the same as the platform's hostname. </td></tr>
     <tr><td class="paramdir">[in]</td><td class="paramname">aType</td><td>The type of this service. </td></tr>
     <tr><td class="paramdir">[in]</td><td class="paramname">aSubTypeList</td><td>A list of service subtypes. </td></tr>
     <tr><td class="paramdir">[in]</td><td class="paramname">aPort</td><td>The port number of this service. </td></tr>

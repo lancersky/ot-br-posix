@@ -22,7 +22,7 @@
  <tr style="height: 56px;">
   <td id="projectalign" style="padding-left: 0.5em;">
    <div id="projectname">openthread-br
-   &#160;<span id="projectnumber">0.3.0-d3442f2</span>
+   &#160;<span id="projectnumber">0.3.0-902eb71</span>
    </div>
   </td>
  </tr>
@@ -139,13 +139,13 @@ $(function() {
 <div class="line"><a name="l00091"></a><span class="lineno">   91</span>&#160;    <span class="keywordtype">void</span>               OnDiscoveryProxyUnsubscribe(<span class="keyword">const</span> <span class="keywordtype">char</span> *aSubscription);</div>
 <div class="line"><a name="l00092"></a><span class="lineno">   92</span>&#160;    <span class="keywordtype">int</span>                GetServiceSubscriptionCount(<span class="keyword">const</span> <a class="code" href="../../d1/de1/structDnsNameInfo.html">DnsNameInfo</a> &amp;aNameInfo) <span class="keyword">const</span>;</div>
 <div class="line"><a name="l00093"></a><span class="lineno">   93</span>&#160;    <span class="keyword">static</span> std::string TranslateDomain(<span class="keyword">const</span> std::string &amp;aName, <span class="keyword">const</span> std::string &amp;aTargetDomain);</div>
-<div class="line"><a name="l00094"></a><span class="lineno">   94</span>&#160;    <span class="keywordtype">void</span>               OnServiceDiscovered(<span class="keyword">const</span> std::string &amp;                            aSubscription,</div>
+<div class="line"><a name="l00094"></a><span class="lineno">   94</span>&#160;    <span class="keywordtype">void</span>               OnServiceDiscovered(<span class="keyword">const</span> std::string                             &amp;aSubscription,</div>
 <div class="line"><a name="l00095"></a><span class="lineno">   95</span>&#160;                                           <span class="keyword">const</span> Mdns::Publisher::DiscoveredInstanceInfo &amp;aInstanceInfo);</div>
 <div class="line"><a name="l00096"></a><span class="lineno">   96</span>&#160;    <span class="keywordtype">void</span> OnHostDiscovered(<span class="keyword">const</span> std::string &amp;aHostName, <span class="keyword">const</span> Mdns::Publisher::DiscoveredHostInfo &amp;aHostInfo);</div>
 <div class="line"><a name="l00097"></a><span class="lineno">   97</span>&#160;    <span class="keyword">static</span> uint32_t CapTtl(uint32_t aTtl);</div>
 <div class="line"><a name="l00098"></a><span class="lineno">   98</span>&#160; </div>
 <div class="line"><a name="l00099"></a><span class="lineno">   99</span>&#160;    Ncp::ControllerOpenThread &amp;mNcp;</div>
-<div class="line"><a name="l00100"></a><span class="lineno">  100</span>&#160;    Mdns::Publisher &amp;          mMdnsPublisher;</div>
+<div class="line"><a name="l00100"></a><span class="lineno">  100</span>&#160;    Mdns::Publisher           &amp;mMdnsPublisher;</div>
 <div class="line"><a name="l00101"></a><span class="lineno">  101</span>&#160;    uint64_t                   mSubscriberId = 0;</div>
 <div class="line"><a name="l00102"></a><span class="lineno">  102</span>&#160;};</div>
 <div class="line"><a name="l00103"></a><span class="lineno">  103</span>&#160; </div>
