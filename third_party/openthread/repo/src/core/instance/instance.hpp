@@ -47,7 +47,6 @@
 #include "common/array.hpp"
 #include "common/as_core_type.hpp"
 #include "common/error.hpp"
-#include "common/extension.hpp"
 #include "common/log.hpp"
 #include "common/message.hpp"
 #include "common/non_copyable.hpp"
@@ -57,6 +56,7 @@
 #include "common/timer.hpp"
 #include "common/uptime.hpp"
 #include "diags/factory_diags.hpp"
+#include "instance/extension.hpp"
 #include "mac/link_raw.hpp"
 #include "radio/radio.hpp"
 #include "utils/otns.hpp"
@@ -127,6 +127,7 @@
 #include "utils/heap.hpp"
 #include "utils/history_tracker.hpp"
 #include "utils/jam_detector.hpp"
+#include "utils/link_metrics_manager.hpp"
 #include "utils/mesh_diag.hpp"
 #include "utils/ping_sender.hpp"
 #include "utils/slaac_address.hpp"
@@ -234,6 +235,18 @@ public:
      *
      */
     void Reset(void);
+
+#if OPENTHREAD_CONFIG_PLATFORM_BOOTLOADER_MODE_ENABLE
+    /**
+     * Triggers a platform reset to bootloader mode, if supported.
+     *
+     * @retval kErrorNone        Reset to bootloader successfully.
+     * @retval kErrorBusy        Failed due to another operation is ongoing.
+     * @retval kErrorNotCapable  Not capable of resetting to bootloader.
+     *
+     */
+    Error ResetToBootloader(void);
+#endif
 
 #if OPENTHREAD_RADIO
     /**
@@ -610,6 +623,10 @@ private:
     Utils::HistoryTracker mHistoryTracker;
 #endif
 
+#if OPENTHREAD_CONFIG_LINK_METRICS_MANAGER_ENABLE
+    Utils::LinkMetricsManager mLinkMetricsManager;
+#endif
+
 #if (OPENTHREAD_CONFIG_DATASET_UPDATER_ENABLE || OPENTHREAD_CONFIG_CHANNEL_MANAGER_ENABLE) && OPENTHREAD_FTD
     MeshCoP::DatasetUpdater mDatasetUpdater;
 #endif
@@ -899,6 +916,10 @@ template <> inline Utils::MeshDiag &Instance::Get(void) { return mMeshDiag; }
 
 #if OPENTHREAD_CONFIG_HISTORY_TRACKER_ENABLE
 template <> inline Utils::HistoryTracker &Instance::Get(void) { return mHistoryTracker; }
+#endif
+
+#if OPENTHREAD_CONFIG_LINK_METRICS_MANAGER_ENABLE
+template <> inline Utils::LinkMetricsManager &Instance::Get(void) { return mLinkMetricsManager; }
 #endif
 
 #if (OPENTHREAD_CONFIG_DATASET_UPDATER_ENABLE || OPENTHREAD_CONFIG_CHANNEL_MANAGER_ENABLE) && OPENTHREAD_FTD

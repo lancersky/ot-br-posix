@@ -216,6 +216,9 @@ Instance::Instance(void)
 #if OPENTHREAD_CONFIG_HISTORY_TRACKER_ENABLE
     , mHistoryTracker(*this)
 #endif
+#if OPENTHREAD_CONFIG_LINK_METRICS_MANAGER_ENABLE
+    , mLinkMetricsManager(*this)
+#endif
 #if (OPENTHREAD_CONFIG_DATASET_UPDATER_ENABLE || OPENTHREAD_CONFIG_CHANNEL_MANAGER_ENABLE) && OPENTHREAD_FTD
     , mDatasetUpdater(*this)
 #endif
@@ -308,6 +311,10 @@ exit:
 #endif // OPENTHREAD_CONFIG_MULTIPLE_INSTANCE_ENABLE
 
 void Instance::Reset(void) { otPlatReset(this); }
+
+#if OPENTHREAD_CONFIG_PLATFORM_BOOTLOADER_MODE_ENABLE
+Error Instance::ResetToBootloader(void) { return otPlatResetToBootloader(this); }
+#endif
 
 #if OPENTHREAD_RADIO
 void Instance::ResetRadioStack(void)
