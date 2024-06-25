@@ -230,6 +230,36 @@ message TelemetryData {
 
     // Error counters for NAT64 translator on the border router
     optional Nat64ErrorCounters nat64_error_counters = 20;
+
+    // The counter for inbound Internet when DHCPv6 PD enabled
+    optional PacketsAndBytes inbound_internet = 21;
+
+    // The counter for outbound Internet when DHCPv6 PD enabled
+    optional PacketsAndBytes outbound_internet = 22;
+  }
+
+  enum Dhcp6PdState {
+    DHCP6_PD_STATE_UNSPECIFIED = 0;
+
+    // DHCPv6 PD is disabled on the border router.
+    DHCP6_PD_STATE_DISABLED = 1;
+
+    // DHCPv6 PD is enabled but won't try to request and publish a prefix.
+    DHCP6_PD_STATE_STOPPED = 2;
+
+    // DHCPv6 PD is enabled and will try to request and publish a prefix.
+    DHCP6_PD_STATE_RUNNING = 3;
+  }
+
+  message PdProcessedRaInfo {
+    // The number of platform generated RA handled by ApplyPlatfromGeneratedRa.
+    optional uint32 num_platform_ra_received = 1;
+
+    // The number of PIO processed for adding OMR prefixes.
+    optional uint32 num_platform_pio_processed = 2;
+
+    // The timestamp of last processed RA message.
+    optional uint32 last_platform_ra_msec = 3;
   }
 
   message SrpServerRegistrationInfo {
@@ -290,6 +320,12 @@ message TelemetryData {
     SRP_SERVER_ADDRESS_MODE_STATE_ANYCAST = 2;
   }
 
+  enum UpstreamDnsQueryState {
+    UPSTREAMDNS_QUERY_STATE_UNSPECIFIED = 0;
+    UPSTREAMDNS_QUERY_STATE_ENABLED = 1;
+    UPSTREAMDNS_QUERY_STATE_DISABLED = 2;
+  }
+
   message SrpServerInfo {
     // The state of the SRP server
     optional SrpServerState state = 1;
@@ -307,6 +343,34 @@ message TelemetryData {
 
     // The counters of response codes sent by the SRP server
     optional SrpServerResponseCounters response_counters = 6;
+  }
+
+  message TrelPacketCounters {
+    // The number of packets successfully transmitted through TREL
+    optional uint64 trel_tx_packets = 1;
+
+    // The number of bytes successfully transmitted through TREL
+    optional uint64 trel_tx_bytes = 2;
+
+    // The number of packet transmission failures through TREL
+    optional uint64 trel_tx_packets_failed = 3;
+
+    // The number of packets successfully received through TREL
+    optional uint64 tre_rx_packets = 4;
+
+    // The number of bytes successfully received through TREL
+    optional uint64 trel_rx_bytes = 5;
+  }
+
+  message TrelInfo {
+    // Whether TREL is enabled.
+    optional bool is_trel_enabled = 1;
+
+    // The number of TREL peers.
+    optional uint32 num_trel_peers = 2;
+
+    // TREL packet counters
+    optional TrelPacketCounters counters = 3;
   }
 
   message DnsServerResponseCounters {
@@ -327,6 +391,15 @@ message TelemetryData {
 
     // The number of other responses
     optional uint32 other_count = 6;
+
+    // The number of queries handled by Upstream DNS server.
+    optional uint32 upstream_dns_queries = 7;
+
+    // The number of responses handled by Upstream DNS server.
+    optional uint32 upstream_dns_responses = 8;
+
+    // The number of upstream DNS failures.
+    optional uint32 upstream_dns_failures = 9;
   }
 
   message DnsServerInfo {
@@ -335,6 +408,9 @@ message TelemetryData {
 
     // The number of DNS queries resolved at the local SRP server
     optional uint32 resolved_by_local_srp_count = 2;
+
+    // The state of upstream DNS query
+    optional UpstreamDnsQueryState upstream_dns_query_state = 3;
   }
 
   message MdnsResponseCounters {
@@ -410,6 +486,16 @@ message TelemetryData {
     optional Nat64ProtocolCounters counters = 3;
   }
 
+  message InfraLinkInfo {
+    optional string name = 1;
+    optional bool is_up = 2;
+    optional bool is_running = 3;
+    optional bool is_multicast = 4;
+    optional uint32 link_local_address_count = 5;
+    optional uint32 unique_local_address_count = 6;
+    optional uint32 global_unicast_address_count = 7;
+  }
+
   message WpanBorderRouter {
     // Border routing counters
     optional BorderRoutingCounters border_routing_counters = 1;
@@ -431,6 +517,21 @@ message TelemetryData {
 
     // Information about the mappings of NAT64 translator
     repeated Nat64Mapping nat64_mappings = 7;
+
+    // DHCPv6 PD state
+    optional Dhcp6PdState dhcp6_pd_state = 8;
+
+    // DHCPv6 PD prefix
+    optional bytes hashed_pd_prefix = 9;
+
+    // DHCPv6 PD processed RA Info
+    optional PdProcessedRaInfo pd_processed_ra_info= 10;
+
+    // Information about TREL.
+    optional TrelInfo trel_info = 11;
+
+    // Information about the infra link
+    optional InfraLinkInfo infra_link_info = 12;
   }
 
   message RcpStabilityStatistics {
@@ -478,6 +579,15 @@ message TelemetryData {
     optional uint32 rx_average_request_to_grant_time_us = 15;
   }
 
+  message LinkMetricsEntry {
+    optional int32 link_margin = 1;
+    optional int32 rssi = 2;
+  }
+
+  message LowPowerMetrics {
+    repeated LinkMetricsEntry link_metrics_entries = 1;
+  }
+
   optional WpanStats wpan_stats = 1;
   optional WpanTopoFull wpan_topo_full = 2;
   repeated TopoEntry topo_entries = 3;
@@ -486,4 +596,5 @@ message TelemetryData {
   // Deprecate CoexMetrics with int64 as its fields types to save storage.
   reserved 6;
   optional CoexMetrics coex_metrics = 7;
+  optional LowPowerMetrics low_power_metrics = 8;
 }

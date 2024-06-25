@@ -86,10 +86,8 @@ class SrpAutoHostAddress(thread_cert.TestCase):
         self.simulator.go(5)
 
         #-------------------------------------------------------------------
-        # Enable auto start mode on SRP client
+        # Check auto start mode on SRP client
 
-        self.assertEqual(client.srp_client_get_state(), 'Disabled')
-        client.srp_client_enable_auto_start_mode()
         self.assertEqual(client.srp_client_get_auto_start_mode(), 'Enabled')
         self.simulator.go(2)
 
@@ -156,16 +154,27 @@ class SrpAutoHostAddress(thread_cert.TestCase):
         self.check_registered_addresses(client, server)
 
         #-------------------------------------------------------------------
-        # Remove the on-mesh prefix (which will trigger an address to be
-        # removed) and check that the SRP client re-registered and updated
-        # server with the remaining address.
+        # Add a non-preferred SLAAC on-mesh prefix and check that the
+        # set of registered addresses remains unchanged and that the
+        # non-preferred  address is not registered by SRP client.
 
-        client.remove_prefix('fd00:abba:cafe:bee::/64')
+        client.add_prefix('fd00:a:b:c::/64', 'aos')
         client.register_netdata()
         self.simulator.go(5)
 
-        slaac_addr = [addr.strip() for addr in client.get_addrs() if addr.strip().startswith('fd00:abba:cafe:bee:')]
-        self.assertEqual(len(slaac_addr), 0)
+        slaac_addr = [addr.strip() for addr in client.get_addrs() if addr.strip().startswith('fd00:a:b:c:')]
+        self.assertEqual(len(slaac_addr), 1)
+        self.check_registered_addresses(client, server)
+
+        #-------------------------------------------------------------------
+        # Remove the on-mesh prefix and check that the SRP client
+        # re-registered and updated server with the remaining address.
+
+        client.remove_prefix('fd00:abba:cafe:bee::/64')
+        client.register_netdata()
+
+        self.simulator.go(5)
+
         self.check_registered_addresses(client, server)
 
         #-------------------------------------------------------------------
@@ -174,10 +183,9 @@ class SrpAutoHostAddress(thread_cert.TestCase):
 
         client.remove_prefix('fd00:9:8:7::/64')
         client.register_netdata()
+
         self.simulator.go(5)
 
-        slaac_addr = [addr.strip() for addr in client.get_addrs() if addr.strip().startswith('fd00:9:8:7:')]
-        self.assertEqual(len(slaac_addr), 0)
         self.check_registered_addresses(client, server)
 
         #-------------------------------------------------------------------
@@ -219,19 +227,21 @@ class SrpAutoHostAddress(thread_cert.TestCase):
         # Check the host addresses on server to match client.
 
         host_addresses = [addr.strip() for addr in server_host['addresses']]
-        client_addresses = [addr.strip() for addr in client.get_addrs()]
+
+        client_mleid = client.get_mleid()
+        client_addresses = [addr.split(' ')[0] for addr in client.get_addrs(verbose=True) if 'preferred:1' in addr]
+        client_addresses += [client_mleid]
 
         # All registered addresses must be in client list of addresses.
 
         for addr in host_addresses:
             self.assertIn(addr, client_addresses)
 
-        # All addresses on client excluding link-local and mesh-local
-        # addresses must be seen on server side. But if there was
-        # no address, then mesh-local address should be the only
+        # All preferred addresses on client excluding link-local and
+        # mesh-local addresses must be seen on server side. But if there
+        # was no address, then mesh-local address should be the only
         # one registered.
 
-        client_mleid = client.get_mleid()
         checked_address = False
 
         for addr in client_addresses:

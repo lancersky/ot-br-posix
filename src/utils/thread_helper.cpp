@@ -35,8 +35,6 @@
 #include <string.h>
 #include <time.h>
 
-#include <string>
-
 #include <openthread/border_router.h>
 #include <openthread/channel_manager.h>
 #include <openthread/dataset_ftd.h>
@@ -50,10 +48,20 @@
 #include <openthread/nat64.h>
 #include "utils/sha256.hpp"
 #endif
+#if OTBR_ENABLE_DHCP6_PD
+#include "utils/sha256.hpp"
+#endif
+#if OTBR_ENABLE_LINK_METRICS_TELEMETRY
+#include <openthread/link_metrics.h>
+#endif
 #if OTBR_ENABLE_SRP_ADVERTISING_PROXY
 #include <openthread/srp_server.h>
 #endif
 #include <openthread/thread_ftd.h>
+#if OTBR_ENABLE_TREL
+#include <openthread/trel.h>
+#endif
+#include <net/if.h>
 #include <openthread/platform/radio.h>
 
 #include "common/byteswap.hpp"
@@ -181,6 +189,30 @@ void CopyNat64TrafficCounters(const otNat64Counters &from, threadnetwork::Teleme
 }
 #endif // OTBR_ENABLE_NAT64
 
+#if OTBR_ENABLE_DHCP6_PD
+threadnetwork::TelemetryData_Dhcp6PdState Dhcp6PdStateFromOtDhcp6PdState(otBorderRoutingDhcp6PdState dhcp6PdState)
+{
+    threadnetwork::TelemetryData_Dhcp6PdState pdState = threadnetwork::TelemetryData::DHCP6_PD_STATE_UNSPECIFIED;
+
+    switch (dhcp6PdState)
+    {
+    case OT_BORDER_ROUTING_DHCP6_PD_STATE_DISABLED:
+        pdState = threadnetwork::TelemetryData::DHCP6_PD_STATE_DISABLED;
+        break;
+    case OT_BORDER_ROUTING_DHCP6_PD_STATE_STOPPED:
+        pdState = threadnetwork::TelemetryData::DHCP6_PD_STATE_STOPPED;
+        break;
+    case OT_BORDER_ROUTING_DHCP6_PD_STATE_RUNNING:
+        pdState = threadnetwork::TelemetryData::DHCP6_PD_STATE_RUNNING;
+        break;
+    default:
+        break;
+    }
+
+    return pdState;
+}
+#endif // OTBR_ENABLE_DHCP6_PD
+
 void CopyMdnsResponseCounters(const MdnsResponseCounters &from, threadnetwork::TelemetryData_MdnsResponseCounters *to)
 {
     to->set_success_count(from.mSuccess);
@@ -199,10 +231,10 @@ ThreadHelper::ThreadHelper(otInstance *aInstance, otbr::Ncp::ControllerOpenThrea
     : mInstance(aInstance)
     , mNcp(aNcp)
 {
-#if OTBR_ENABLE_TELEMETRY_DATA_API && OTBR_ENABLE_NAT64
+#if OTBR_ENABLE_TELEMETRY_DATA_API && (OTBR_ENABLE_NAT64 || OTBR_ENABLE_DHCP6_PD)
     otError error;
 
-    SuccessOrExit(error = otPlatCryptoRandomGet(mNat64Ipv6AddressSalt, sizeof(mNat64Ipv6AddressSalt)));
+    SuccessOrExit(error = otPlatCryptoRandomGet(mNat64PdCommonSalt, sizeof(mNat64PdCommonSalt)));
 
 exit:
     if (error != OT_ERROR_NONE)
@@ -890,7 +922,8 @@ void ThreadHelper::DetachGracefullyCallback(void)
 #if OTBR_ENABLE_TELEMETRY_DATA_API
 otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadnetwork::TelemetryData &telemetryData)
 {
-    otError error = OT_ERROR_NONE;
+    otError                     error = OT_ERROR_NONE;
+    std::vector<otNeighborInfo> neighborTable;
 
     // Begin of WpanStats section.
     auto wpanStats = telemetryData.mutable_wpan_stats();
@@ -913,8 +946,14 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
     {
         int8_t radioTxPower;
 
-        SuccessOrExit(error = otPlatRadioGetTransmitPower(mInstance, &radioTxPower));
-        wpanStats->set_radio_tx_power(radioTxPower);
+        if (otPlatRadioGetTransmitPower(mInstance, &radioTxPower) == OT_ERROR_NONE)
+        {
+            wpanStats->set_radio_tx_power(radioTxPower);
+        }
+        else
+        {
+            error = OT_ERROR_FAILED;
+        }
     }
 
     {
@@ -968,14 +1007,21 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
 
         wpanTopoFull->set_rloc16(rloc16);
 
-        otRouterInfo info;
+        {
+            otRouterInfo info;
 
-        VerifyOrExit(otThreadGetRouterInfo(mInstance, rloc16, &info) == OT_ERROR_NONE, error = OT_ERROR_INVALID_STATE);
-        wpanTopoFull->set_router_id(info.mRouterId);
+            if (otThreadGetRouterInfo(mInstance, rloc16, &info) == OT_ERROR_NONE)
+            {
+                wpanTopoFull->set_router_id(info.mRouterId);
+            }
+            else
+            {
+                error = OT_ERROR_FAILED;
+            }
+        }
 
-        otNeighborInfoIterator      iter = OT_NEIGHBOR_INFO_ITERATOR_INIT;
-        otNeighborInfo              neighborInfo;
-        std::vector<otNeighborInfo> neighborTable;
+        otNeighborInfoIterator iter = OT_NEIGHBOR_INFO_ITERATOR_INIT;
+        otNeighborInfo         neighborInfo;
 
         while (otThreadGetNextNeighborInfo(mInstance, &iter, &neighborInfo) == OT_ERROR_NONE)
         {
@@ -994,13 +1040,21 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
         }
         wpanTopoFull->set_child_table_size(childTable.size());
 
-        struct otLeaderData leaderData;
+        {
+            struct otLeaderData leaderData;
 
-        SuccessOrExit(error = otThreadGetLeaderData(mInstance, &leaderData));
-        wpanTopoFull->set_leader_router_id(leaderData.mLeaderRouterId);
-        wpanTopoFull->set_leader_weight(leaderData.mWeighting);
-        wpanTopoFull->set_network_data_version(leaderData.mDataVersion);
-        wpanTopoFull->set_stable_network_data_version(leaderData.mStableDataVersion);
+            if (otThreadGetLeaderData(mInstance, &leaderData) == OT_ERROR_NONE)
+            {
+                wpanTopoFull->set_leader_router_id(leaderData.mLeaderRouterId);
+                wpanTopoFull->set_leader_weight(leaderData.mWeighting);
+                wpanTopoFull->set_network_data_version(leaderData.mDataVersion);
+                wpanTopoFull->set_stable_network_data_version(leaderData.mStableDataVersion);
+            }
+            else
+            {
+                error = OT_ERROR_FAILED;
+            }
+        }
 
         uint8_t weight = otThreadGetLocalLeaderWeight(mInstance);
 
@@ -1016,9 +1070,15 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
             uint8_t              len = sizeof(data);
             std::vector<uint8_t> networkData;
 
-            SuccessOrExit(error = otNetDataGet(mInstance, /*stable=*/false, data, &len));
-            networkData = std::vector<uint8_t>(&data[0], &data[len]);
-            wpanTopoFull->set_network_data(std::string(networkData.begin(), networkData.end()));
+            if (otNetDataGet(mInstance, /*stable=*/false, data, &len) == OT_ERROR_NONE)
+            {
+                networkData = std::vector<uint8_t>(&data[0], &data[len]);
+                wpanTopoFull->set_network_data(std::string(networkData.begin(), networkData.end()));
+            }
+            else
+            {
+                error = OT_ERROR_FAILED;
+            }
         }
 
         {
@@ -1026,9 +1086,15 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
             uint8_t              len = sizeof(data);
             std::vector<uint8_t> networkData;
 
-            SuccessOrExit(error = otNetDataGet(mInstance, /*stable=*/true, data, &len));
-            networkData = std::vector<uint8_t>(&data[0], &data[len]);
-            wpanTopoFull->set_stable_network_data(std::string(networkData.begin(), networkData.end()));
+            if (otNetDataGet(mInstance, /*stable=*/true, data, &len) == OT_ERROR_NONE)
+            {
+                networkData = std::vector<uint8_t>(&data[0], &data[len]);
+                wpanTopoFull->set_stable_network_data(std::string(networkData.begin(), networkData.end()));
+            }
+            else
+            {
+                error = OT_ERROR_FAILED;
+            }
         }
 
         int8_t rssi = otPlatRadioGetRssi(mInstance);
@@ -1122,6 +1188,14 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
         borderRoutingCouters->set_rs_rx(otBorderRoutingCounters->mRsRx);
         borderRoutingCouters->set_rs_tx_success(otBorderRoutingCounters->mRsTxSuccess);
         borderRoutingCouters->set_rs_tx_failure(otBorderRoutingCounters->mRsTxFailure);
+        borderRoutingCouters->mutable_inbound_internet()->set_packet_count(
+            otBorderRoutingCounters->mInboundInternet.mPackets);
+        borderRoutingCouters->mutable_inbound_internet()->set_byte_count(
+            otBorderRoutingCounters->mInboundInternet.mBytes);
+        borderRoutingCouters->mutable_outbound_internet()->set_packet_count(
+            otBorderRoutingCounters->mOutboundInternet.mPackets);
+        borderRoutingCouters->mutable_outbound_internet()->set_byte_count(
+            otBorderRoutingCounters->mOutboundInternet.mBytes);
 
 #if OTBR_ENABLE_NAT64
         {
@@ -1169,6 +1243,45 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
         }
 #endif // OTBR_ENABLE_NAT64
        // End of BorderRoutingCounters section.
+
+#if OTBR_ENABLE_TREL
+        // Begin of TrelInfo section.
+        {
+            auto trelInfo       = wpanBorderRouter->mutable_trel_info();
+            auto otTrelCounters = otTrelGetCounters(mInstance);
+            auto trelCounters   = trelInfo->mutable_counters();
+
+            trelInfo->set_is_trel_enabled(otTrelIsEnabled(mInstance));
+            trelInfo->set_num_trel_peers(otTrelGetNumberOfPeers(mInstance));
+
+            trelCounters->set_trel_tx_packets(otTrelCounters->mTxPackets);
+            trelCounters->set_trel_tx_bytes(otTrelCounters->mTxBytes);
+            trelCounters->set_trel_tx_packets_failed(otTrelCounters->mTxFailure);
+            trelCounters->set_tre_rx_packets(otTrelCounters->mRxPackets);
+            trelCounters->set_trel_rx_bytes(otTrelCounters->mRxBytes);
+        }
+        // End of TrelInfo section.
+#endif // OTBR_ENABLE_TREL
+
+#if OTBR_ENABLE_BORDER_ROUTING
+        // Begin of InfraLinkInfo section.
+        {
+            auto                           infraLinkInfo = wpanBorderRouter->mutable_infra_link_info();
+            otSysInfraNetIfAddressCounters addressCounters;
+            uint32_t                       ifrFlags = otSysGetInfraNetifFlags();
+
+            otSysCountInfraNetifAddresses(&addressCounters);
+
+            infraLinkInfo->set_name(otSysGetInfraNetifName());
+            infraLinkInfo->set_is_up((ifrFlags & IFF_UP) != 0);
+            infraLinkInfo->set_is_running((ifrFlags & IFF_RUNNING) != 0);
+            infraLinkInfo->set_is_multicast((ifrFlags & IFF_MULTICAST) != 0);
+            infraLinkInfo->set_link_local_address_count(addressCounters.mLinkLocalAddresses);
+            infraLinkInfo->set_unique_local_address_count(addressCounters.mUniqueLocalAddresses);
+            infraLinkInfo->set_global_unicast_address_count(addressCounters.mGlobalUnicastAddresses);
+        }
+        // End of InfraLinkInfo section.
+#endif
 
 #if OTBR_ENABLE_SRP_ADVERTISING_PROXY
         // Begin of SrpServerInfo section.
@@ -1253,8 +1366,19 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
             dnsServerResponseCounters->set_name_error_count(otDnssdCounters.mNameErrorResponse);
             dnsServerResponseCounters->set_not_implemented_count(otDnssdCounters.mNotImplementedResponse);
             dnsServerResponseCounters->set_other_count(otDnssdCounters.mOtherResponse);
+            // The counters of queries, responses, failures handled by upstream DNS server.
+            dnsServerResponseCounters->set_upstream_dns_queries(otDnssdCounters.mUpstreamDnsCounters.mQueries);
+            dnsServerResponseCounters->set_upstream_dns_responses(otDnssdCounters.mUpstreamDnsCounters.mResponses);
+            dnsServerResponseCounters->set_upstream_dns_failures(otDnssdCounters.mUpstreamDnsCounters.mFailures);
 
             dnsServer->set_resolved_by_local_srp_count(otDnssdCounters.mResolvedBySrp);
+
+#if OTBR_ENABLE_DNS_UPSTREAM_QUERY
+            dnsServer->set_upstream_dns_query_state(
+                otDnssdUpstreamQueryIsEnabled(mInstance)
+                    ? threadnetwork::TelemetryData::UPSTREAMDNS_QUERY_STATE_ENABLED
+                    : threadnetwork::TelemetryData::UPSTREAMDNS_QUERY_STATE_DISABLED);
+#endif // OTBR_ENABLE_DNS_UPSTREAM_QUERY
         }
         // End of DnsServerInfo section.
 #endif // OTBR_ENABLE_DNSSD_DISCOVERY_PROXY
@@ -1305,54 +1429,112 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
                 CopyNat64TrafficCounters(otMapping.mCounters.mUdp, nat64MappingCounters->mutable_udp());
                 CopyNat64TrafficCounters(otMapping.mCounters.mIcmp, nat64MappingCounters->mutable_icmp());
 
-                {
-                    uint8_t ipAddrShaInput[OT_IP6_ADDRESS_SIZE + kNat64SourceAddressHashSaltLength];
-                    memcpy(ipAddrShaInput, otMapping.mIp6.mFields.m8, sizeof(otMapping.mIp6.mFields.m8));
-                    memcpy(&ipAddrShaInput[sizeof(otMapping.mIp6.mFields.m8)], mNat64Ipv6AddressSalt,
-                           sizeof(mNat64Ipv6AddressSalt));
+                sha256.Start();
+                sha256.Update(otMapping.mIp6.mFields.m8, sizeof(otMapping.mIp6.mFields.m8));
+                sha256.Update(mNat64PdCommonSalt, sizeof(mNat64PdCommonSalt));
+                sha256.Finish(hash);
 
-                    sha256.Start();
-                    sha256.Update(ipAddrShaInput, sizeof(ipAddrShaInput));
-                    sha256.Finish(hash);
-
-                    nat64Mapping->mutable_hashed_ipv6_address()->append(reinterpret_cast<const char *>(hash.GetBytes()),
-                                                                        sizeof(hash.GetBytes()));
-                    // Remaining time is not included in the telemetry
-                }
+                nat64Mapping->mutable_hashed_ipv6_address()->append(reinterpret_cast<const char *>(hash.GetBytes()),
+                                                                    Sha256::Hash::kSize);
+                // Remaining time is not included in the telemetry
             }
         }
         // End of Nat64Mapping section.
 #endif // OTBR_ENABLE_NAT64
+#if OTBR_ENABLE_DHCP6_PD
+        // Start of Dhcp6PdState section.
+        wpanBorderRouter->set_dhcp6_pd_state(Dhcp6PdStateFromOtDhcp6PdState(otBorderRoutingDhcp6PdGetState(mInstance)));
+        // End of Dhcp6PdState section.
 
-        // End of WpanBorderRouter section.
+        // Start of Hashed PD prefix
+        {
+            otBorderRoutingPrefixTableEntry aPrefixInfo;
+            const uint8_t                  *prefixAddr          = nullptr;
+            const uint8_t                  *truncatedHash       = nullptr;
+            constexpr size_t                kHashPrefixLength   = 6;
+            constexpr size_t                kHashedPrefixLength = 2;
+            std::vector<uint8_t>            hashedPdHeader      = {0x20, 0x01, 0x0d, 0xb8};
+            std::vector<uint8_t>            hashedPdTailer      = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+            std::vector<uint8_t>            hashedPdPrefix;
+            hashedPdPrefix.reserve(16);
+            Sha256       sha256;
+            Sha256::Hash hash;
+
+            otBorderRoutingGetPdOmrPrefix(mInstance, &aPrefixInfo);
+            prefixAddr = aPrefixInfo.mPrefix.mPrefix.mFields.m8;
+
+            // TODO: Put below steps into a reusable function.
+            sha256.Start();
+            sha256.Update(prefixAddr, kHashPrefixLength);
+            sha256.Update(mNat64PdCommonSalt, kNat64PdCommonHashSaltLength);
+            sha256.Finish(hash);
+
+            // Append hashedPdHeader
+            hashedPdPrefix.insert(hashedPdPrefix.end(), hashedPdHeader.begin(), hashedPdHeader.end());
+
+            // Append the first 2 bytes of the hashed prefix
+            truncatedHash = hash.GetBytes();
+            hashedPdPrefix.insert(hashedPdPrefix.end(), truncatedHash, truncatedHash + kHashedPrefixLength);
+
+            // Append ip[6] and ip[7]
+            hashedPdPrefix.push_back(prefixAddr[6]);
+            hashedPdPrefix.push_back(prefixAddr[7]);
+
+            // Append hashedPdTailer
+            hashedPdPrefix.insert(hashedPdPrefix.end(), hashedPdTailer.begin(), hashedPdTailer.end());
+
+            wpanBorderRouter->mutable_hashed_pd_prefix()->append(reinterpret_cast<const char *>(hashedPdPrefix.data()),
+                                                                 hashedPdPrefix.size());
+        }
+        // End of Hashed PD prefix
+        // Start of DHCPv6 PD processed RA Info
+        {
+            auto                pdProcessedRaInfo = wpanBorderRouter->mutable_pd_processed_ra_info();
+            otPdProcessedRaInfo raInfo;
+
+            otBorderRoutingGetPdProcessedRaInfo(mInstance, &raInfo);
+            pdProcessedRaInfo->set_num_platform_ra_received(raInfo.mNumPlatformRaReceived);
+            pdProcessedRaInfo->set_num_platform_pio_processed(raInfo.mNumPlatformPioProcessed);
+            pdProcessedRaInfo->set_last_platform_ra_msec(raInfo.mLastPlatformRaMsec);
+        }
+        // End of DHCPv6 PD processed RA Info
+#endif // OTBR_ENABLE_DHCP6_PD
+       // End of WpanBorderRouter section.
 
         // Start of WpanRcp section.
         {
-            auto                 wpanRcp                = telemetryData.mutable_wpan_rcp();
-            auto                 rcpStabilityStatistics = wpanRcp->mutable_rcp_stability_statistics();
-            otRadioSpinelMetrics otRadioSpinelMetrics   = *otSysGetRadioSpinelMetrics();
+            auto                        wpanRcp                = telemetryData.mutable_wpan_rcp();
+            const otRadioSpinelMetrics *otRadioSpinelMetrics   = otSysGetRadioSpinelMetrics();
+            auto                        rcpStabilityStatistics = wpanRcp->mutable_rcp_stability_statistics();
 
-            rcpStabilityStatistics->set_rcp_timeout_count(otRadioSpinelMetrics.mRcpTimeoutCount);
-            rcpStabilityStatistics->set_rcp_reset_count(otRadioSpinelMetrics.mRcpUnexpectedResetCount);
-            rcpStabilityStatistics->set_rcp_restoration_count(otRadioSpinelMetrics.mRcpRestorationCount);
-            rcpStabilityStatistics->set_spinel_parse_error_count(otRadioSpinelMetrics.mSpinelParseErrorCount);
+            if (otRadioSpinelMetrics != nullptr)
+            {
+                rcpStabilityStatistics->set_rcp_timeout_count(otRadioSpinelMetrics->mRcpTimeoutCount);
+                rcpStabilityStatistics->set_rcp_reset_count(otRadioSpinelMetrics->mRcpUnexpectedResetCount);
+                rcpStabilityStatistics->set_rcp_restoration_count(otRadioSpinelMetrics->mRcpRestorationCount);
+                rcpStabilityStatistics->set_spinel_parse_error_count(otRadioSpinelMetrics->mSpinelParseErrorCount);
+            }
 
             // TODO: provide rcp_firmware_update_count info.
             rcpStabilityStatistics->set_thread_stack_uptime(otInstanceGetUptime(mInstance));
 
-            auto                  rcpInterfaceStatistics = wpanRcp->mutable_rcp_interface_statistics();
-            otRcpInterfaceMetrics otRcpInterfaceMetrics  = *otSysGetRcpInterfaceMetrics();
+            const otRcpInterfaceMetrics *otRcpInterfaceMetrics = otSysGetRcpInterfaceMetrics();
 
-            rcpInterfaceStatistics->set_rcp_interface_type(otRcpInterfaceMetrics.mRcpInterfaceType);
-            rcpInterfaceStatistics->set_transferred_frames_count(otRcpInterfaceMetrics.mTransferredFrameCount);
-            rcpInterfaceStatistics->set_transferred_valid_frames_count(
-                otRcpInterfaceMetrics.mTransferredValidFrameCount);
-            rcpInterfaceStatistics->set_transferred_garbage_frames_count(
-                otRcpInterfaceMetrics.mTransferredGarbageFrameCount);
-            rcpInterfaceStatistics->set_rx_frames_count(otRcpInterfaceMetrics.mRxFrameCount);
-            rcpInterfaceStatistics->set_rx_bytes_count(otRcpInterfaceMetrics.mRxFrameByteCount);
-            rcpInterfaceStatistics->set_tx_frames_count(otRcpInterfaceMetrics.mTxFrameCount);
-            rcpInterfaceStatistics->set_tx_bytes_count(otRcpInterfaceMetrics.mTxFrameByteCount);
+            if (otRcpInterfaceMetrics != nullptr)
+            {
+                auto rcpInterfaceStatistics = wpanRcp->mutable_rcp_interface_statistics();
+
+                rcpInterfaceStatistics->set_rcp_interface_type(otRcpInterfaceMetrics->mRcpInterfaceType);
+                rcpInterfaceStatistics->set_transferred_frames_count(otRcpInterfaceMetrics->mTransferredFrameCount);
+                rcpInterfaceStatistics->set_transferred_valid_frames_count(
+                    otRcpInterfaceMetrics->mTransferredValidFrameCount);
+                rcpInterfaceStatistics->set_transferred_garbage_frames_count(
+                    otRcpInterfaceMetrics->mTransferredGarbageFrameCount);
+                rcpInterfaceStatistics->set_rx_frames_count(otRcpInterfaceMetrics->mRxFrameCount);
+                rcpInterfaceStatistics->set_rx_bytes_count(otRcpInterfaceMetrics->mRxFrameByteCount);
+                rcpInterfaceStatistics->set_tx_frames_count(otRcpInterfaceMetrics->mTxFrameCount);
+                rcpInterfaceStatistics->set_tx_bytes_count(otRcpInterfaceMetrics->mTxFrameByteCount);
+            }
         }
         // End of WpanRcp section.
 
@@ -1361,29 +1543,56 @@ otError ThreadHelper::RetrieveTelemetryData(Mdns::Publisher *aPublisher, threadn
             auto               coexMetrics = telemetryData.mutable_coex_metrics();
             otRadioCoexMetrics otRadioCoexMetrics;
 
-            SuccessOrExit(error = otPlatRadioGetCoexMetrics(mInstance, &otRadioCoexMetrics));
-            coexMetrics->set_count_tx_request(otRadioCoexMetrics.mNumTxRequest);
-            coexMetrics->set_count_tx_grant_immediate(otRadioCoexMetrics.mNumTxGrantImmediate);
-            coexMetrics->set_count_tx_grant_wait(otRadioCoexMetrics.mNumTxGrantWait);
-            coexMetrics->set_count_tx_grant_wait_activated(otRadioCoexMetrics.mNumTxGrantWaitActivated);
-            coexMetrics->set_count_tx_grant_wait_timeout(otRadioCoexMetrics.mNumTxGrantWaitTimeout);
-            coexMetrics->set_count_tx_grant_deactivated_during_request(
-                otRadioCoexMetrics.mNumTxGrantDeactivatedDuringRequest);
-            coexMetrics->set_tx_average_request_to_grant_time_us(otRadioCoexMetrics.mAvgTxRequestToGrantTime);
-            coexMetrics->set_count_rx_request(otRadioCoexMetrics.mNumRxRequest);
-            coexMetrics->set_count_rx_grant_immediate(otRadioCoexMetrics.mNumRxGrantImmediate);
-            coexMetrics->set_count_rx_grant_wait(otRadioCoexMetrics.mNumRxGrantWait);
-            coexMetrics->set_count_rx_grant_wait_activated(otRadioCoexMetrics.mNumRxGrantWaitActivated);
-            coexMetrics->set_count_rx_grant_wait_timeout(otRadioCoexMetrics.mNumRxGrantWaitTimeout);
-            coexMetrics->set_count_rx_grant_deactivated_during_request(
-                otRadioCoexMetrics.mNumRxGrantDeactivatedDuringRequest);
-            coexMetrics->set_count_rx_grant_none(otRadioCoexMetrics.mNumRxGrantNone);
-            coexMetrics->set_rx_average_request_to_grant_time_us(otRadioCoexMetrics.mAvgRxRequestToGrantTime);
+            if (otPlatRadioGetCoexMetrics(mInstance, &otRadioCoexMetrics) == OT_ERROR_NONE)
+            {
+                coexMetrics->set_count_tx_request(otRadioCoexMetrics.mNumTxRequest);
+                coexMetrics->set_count_tx_grant_immediate(otRadioCoexMetrics.mNumTxGrantImmediate);
+                coexMetrics->set_count_tx_grant_wait(otRadioCoexMetrics.mNumTxGrantWait);
+                coexMetrics->set_count_tx_grant_wait_activated(otRadioCoexMetrics.mNumTxGrantWaitActivated);
+                coexMetrics->set_count_tx_grant_wait_timeout(otRadioCoexMetrics.mNumTxGrantWaitTimeout);
+                coexMetrics->set_count_tx_grant_deactivated_during_request(
+                    otRadioCoexMetrics.mNumTxGrantDeactivatedDuringRequest);
+                coexMetrics->set_tx_average_request_to_grant_time_us(otRadioCoexMetrics.mAvgTxRequestToGrantTime);
+                coexMetrics->set_count_rx_request(otRadioCoexMetrics.mNumRxRequest);
+                coexMetrics->set_count_rx_grant_immediate(otRadioCoexMetrics.mNumRxGrantImmediate);
+                coexMetrics->set_count_rx_grant_wait(otRadioCoexMetrics.mNumRxGrantWait);
+                coexMetrics->set_count_rx_grant_wait_activated(otRadioCoexMetrics.mNumRxGrantWaitActivated);
+                coexMetrics->set_count_rx_grant_wait_timeout(otRadioCoexMetrics.mNumRxGrantWaitTimeout);
+                coexMetrics->set_count_rx_grant_deactivated_during_request(
+                    otRadioCoexMetrics.mNumRxGrantDeactivatedDuringRequest);
+                coexMetrics->set_count_rx_grant_none(otRadioCoexMetrics.mNumRxGrantNone);
+                coexMetrics->set_rx_average_request_to_grant_time_us(otRadioCoexMetrics.mAvgRxRequestToGrantTime);
+            }
+            else
+            {
+                error = OT_ERROR_FAILED;
+            }
         }
         // End of CoexMetrics section.
     }
 
-exit:
+#if OTBR_ENABLE_LINK_METRICS_TELEMETRY
+    {
+        auto lowPowerMetrics = telemetryData.mutable_low_power_metrics();
+        // Begin of Link Metrics section.
+        for (const otNeighborInfo &neighborInfo : neighborTable)
+        {
+            otError             query_error;
+            otLinkMetricsValues values;
+
+            query_error = otLinkMetricsManagerGetMetricsValueByExtAddr(mInstance, &neighborInfo.mExtAddress, &values);
+            // Some neighbors don't support Link Metrics Subject feature. So it's expected that some other errors
+            // are returned.
+            if (query_error == OT_ERROR_NONE)
+            {
+                auto linkMetricsStats = lowPowerMetrics->add_link_metrics_entries();
+                linkMetricsStats->set_link_margin(values.mLinkMarginValue);
+                linkMetricsStats->set_rssi(values.mRssiValue);
+            }
+        }
+    }
+#endif // OTBR_ENABLE_LINK_METRICS_TELEMETRY
+
     return error;
 }
 #endif // OTBR_ENABLE_TELEMETRY_DATA_API

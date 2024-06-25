@@ -32,8 +32,8 @@
  *   This file includes the platform-specific initializers.
  */
 
-#ifndef PLATFORM_POSIX_H_
-#define PLATFORM_POSIX_H_
+#ifndef OT_PLATFORM_POSIX_H_
+#define OT_PLATFORM_POSIX_H_
 
 #include "openthread-posix-config.h"
 
@@ -53,6 +53,7 @@
 #include <openthread/platform/time.h>
 
 #include "lib/platform/exit_code.h"
+#include "lib/spinel/coprocessor_type.h"
 #include "lib/url/url.hpp"
 
 /**
@@ -338,13 +339,22 @@ void virtualTimeReceiveEvent(struct VirtualTimeEvent *aEvent);
 void virtualTimeSendSleepEvent(const struct timeval *aTimeout);
 
 /**
- * Performs radio spinel processing of virtual time simulation.
+ * Performs radio processing of virtual time simulation.
  *
  * @param[in]   aInstance   A pointer to the OpenThread instance.
  * @param[in]   aEvent      A pointer to the current event.
  *
  */
-void virtualTimeRadioSpinelProcess(otInstance *aInstance, const struct VirtualTimeEvent *aEvent);
+void virtualTimeRadioProcess(otInstance *aInstance, const struct VirtualTimeEvent *aEvent);
+
+/**
+ * Performs radio  processing of virtual time simulation.
+ *
+ * @param[in]   aInstance   A pointer to the OpenThread instance.
+ * @param[in]   aEvent      A pointer to the current event.
+ *
+ */
+void virtualTimeSpinelProcess(otInstance *aInstance, const struct VirtualTimeEvent *aEvent);
 
 enum SocketBlockOption
 {
@@ -410,75 +420,10 @@ extern char gNetifName[IFNAMSIZ];
 extern unsigned int gNetifIndex;
 
 /**
- * Initializes platform Backbone network.
- *
- * @note This function is called before OpenThread instance is created.
- *
- * @param[in]   aInterfaceName  A pointer to Thread network interface name.
- *
- */
-void platformBackboneInit(const char *aInterfaceName);
-
-/**
- * Sets up platform Backbone network.
- *
- * @note This function is called after OpenThread instance is created.
- *
- * @param[in]   aInstance       A pointer to the OpenThread instance.
- *
- */
-void platformBackboneSetUp(void);
-
-/**
- * Tears down platform Backbone network.
- *
- * @note This function is called before OpenThread instance is destructed.
- *
- */
-void platformBackboneTearDown(void);
-
-/**
- * Shuts down the platform Backbone network.
- *
- * @note This function is called after OpenThread instance is destructed.
- *
- */
-void platformBackboneDeinit(void);
-
-/**
- * Performs notifies state changes to platform Backbone network.
- *
- * @param[in]   aInstance       A pointer to the OpenThread instance.
- * @param[in]   aFlags          Flags that denote the state change events.
- *
- */
-void platformBackboneStateChange(otInstance *aInstance, otChangedFlags aFlags);
-
-/**
  * A pointer to the OpenThread instance.
  *
  */
 extern otInstance *gInstance;
-
-/**
- * The name of Backbone network interface.
- *
- */
-extern char gBackboneNetifName[IFNAMSIZ];
-
-/**
- * The index of Backbone network interface.
- *
- */
-extern unsigned int gBackboneNetifIndex;
-
-/**
- * Tells if the infrastructure interface is running.
- *
- * @returns TRUE if the infrastructure interface is running, FALSE if not.
- *
- */
-bool platformInfraIfIsRunning(void);
 
 /**
  * Initializes backtrace module.
@@ -486,7 +431,41 @@ bool platformInfraIfIsRunning(void);
  */
 void platformBacktraceInit(void);
 
+/**
+ * Initializes the spinel service used by OpenThread.
+ *
+ * @param[in]   aUrl  A pointer to the null-terminated spinel URL.
+ *
+ * @retval  OT_COPROCESSOR_UNKNOWN  The initialization fails.
+ * @retval  OT_COPROCESSOR_RCP      The Co-processor is a RCP.
+ * @retval  OT_COPROCESSOR_NCP      The Co-processor is a NCP.
+ */
+CoprocessorType platformSpinelManagerInit(const char *aUrl);
+
+/**
+ * Shuts down the spinel service used by OpenThread.
+ *
+ */
+void platformSpinelManagerDeinit(void);
+
+/**
+ * Performs spinel driver processing.
+ *
+ * @param[in]   aInstance   A pointer to the OT instance.
+ * @param[in]   aContext    A pointer to the mainloop context.
+ *
+ */
+void platformSpinelManagerProcess(otInstance *aInstance, const otSysMainloopContext *aContext);
+
+/**
+ * Updates the file descriptor sets with file descriptors used by the spinel driver.
+ *
+ * @param[in]   aContext    A pointer to the mainloop context.
+ *
+ */
+void platformSpinelManagerUpdateFdSet(otSysMainloopContext *aContext);
+
 #ifdef __cplusplus
 }
 #endif
-#endif // PLATFORM_POSIX_H_
+#endif // OT_PLATFORM_POSIX_H_

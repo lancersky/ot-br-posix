@@ -106,7 +106,7 @@ void SettingsBase::SrpServerInfo::Log(Action aAction) const
 }
 #endif
 
-#if OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
+#if OPENTHREAD_CONFIG_BORDER_AGENT_ENABLE && OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
 void SettingsBase::BorderAgentId::Log(Action aAction) const
 {
     char         buffer[sizeof(BorderAgentId) * 2 + 1];
@@ -115,7 +115,7 @@ void SettingsBase::BorderAgentId::Log(Action aAction) const
     sw.AppendHexBytes(GetId().mId, sizeof(BorderAgentId));
     LogInfo("%s BorderAgentId {id:%s}", ActionToString(aAction), buffer);
 }
-#endif // OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
+#endif // OPENTHREAD_CONFIG_BORDER_AGENT_ENABLE && OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
 
 #endif // OT_SHOULD_LOG_AT(OT_LOG_LEVEL_INFO)
 
@@ -224,7 +224,7 @@ Settings::Key Settings::KeyForDatasetType(MeshCoP::Dataset::Type aType)
 Error Settings::SaveOperationalDataset(MeshCoP::Dataset::Type aType, const MeshCoP::Dataset &aDataset)
 {
     Key   key   = KeyForDatasetType(aType);
-    Error error = Get<SettingsDriver>().Set(key, aDataset.GetBytes(), aDataset.GetSize());
+    Error error = Get<SettingsDriver>().Set(key, aDataset.GetBytes(), aDataset.GetLength());
 
     Log(kActionSave, error, key);
 
@@ -234,12 +234,12 @@ Error Settings::SaveOperationalDataset(MeshCoP::Dataset::Type aType, const MeshC
 Error Settings::ReadOperationalDataset(MeshCoP::Dataset::Type aType, MeshCoP::Dataset &aDataset) const
 {
     Error    error  = kErrorNone;
-    uint16_t length = MeshCoP::Dataset::kMaxSize;
+    uint16_t length = MeshCoP::Dataset::kMaxLength;
 
     SuccessOrExit(error = Get<SettingsDriver>().Get(KeyForDatasetType(aType), aDataset.GetBytes(), &length));
-    VerifyOrExit(length <= MeshCoP::Dataset::kMaxSize, error = kErrorNotFound);
+    VerifyOrExit(length <= MeshCoP::Dataset::kMaxLength, error = kErrorNotFound);
 
-    aDataset.SetSize(length);
+    aDataset.SetLength(static_cast<uint8_t>(length));
 
 exit:
     return error;
@@ -531,7 +531,7 @@ void Settings::Log(Action aAction, Error aError, Key aKey, const void *aValue)
             break;
 #endif
 
-#if OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
+#if OPENTHREAD_CONFIG_BORDER_AGENT_ENABLE && OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
         case kKeyBorderAgentId:
             reinterpret_cast<const BorderAgentId *>(aValue)->Log(aAction);
             break;

@@ -73,9 +73,6 @@ namespace ot {
  */
 namespace Ip6 {
 
-using ot::Encoding::BigEndian::HostSwap16;
-using ot::Encoding::BigEndian::HostSwap32;
-
 /**
  * @addtogroup core-ipv6
  *
@@ -210,7 +207,6 @@ public:
      * Processes a received IPv6 datagram.
      *
      * @param[in]  aMessage          An owned pointer to a message.
-     * @param[in]  aLinkMessageInfo  A pointer to link-specific message information.
      *
      * @retval kErrorNone     Successfully processed the message.
      * @retval kErrorDrop     Message was well-formed but not fully processed due to packet processing rules.
@@ -219,9 +215,7 @@ public:
      * @retval kErrorParse    Encountered a malformed header when processing the message.
      *
      */
-    Error HandleDatagram(OwnedPtr<Message> aMessagePtr,
-                         const void       *aLinkMessageInfo = nullptr,
-                         bool              aIsReassembled   = false);
+    Error HandleDatagram(OwnedPtr<Message> aMessagePtr, bool aIsReassembled = false);
 
     /**
      * Registers a callback to provide received raw IPv6 datagrams.
@@ -353,7 +347,27 @@ public:
      * Resets the Border Routing counters.
      *
      */
-    void ResetBorderRoutingCounters(void) { memset(&mBorderRoutingCounters, 0, sizeof(mBorderRoutingCounters)); }
+    void ResetBorderRoutingCounters(void) { ClearAllBytes(mBorderRoutingCounters); }
+#endif
+
+#if OPENTHREAD_CONFIG_REFERENCE_DEVICE_ENABLE
+
+    /**
+     * Enables or disables the filter that drops TMF UDP messages from untrusted origin.
+     *
+     * @param[in]  aEnabled  TRUE to enable filter, FALSE otherwise.
+     *
+     */
+    void SetTmfOriginFilterEnabled(bool aEnabled) { mTmfOriginFilterEnabled = aEnabled; }
+
+    /**
+     * Indicates whether the filter that drops TMF UDP messages from untrusted origin is enabled or not.
+     *
+     * @returns TRUE if the filter is enabled, FALSE otherwise.
+     *
+     */
+    bool IsTmfOriginFilterEnabled(void) { return mTmfOriginFilterEnabled; }
+
 #endif
 
 private:
@@ -381,7 +395,7 @@ private:
                                  uint8_t           &aNextHeader,
                                  bool              &aReceive);
     Error FragmentDatagram(Message &aMessage, uint8_t aIpProto);
-    Error HandleFragment(Message &aMessage, MessageInfo &aMessageInfo);
+    Error HandleFragment(Message &aMessage);
 #if OPENTHREAD_CONFIG_IP6_FRAGMENTATION_ENABLE
     void CleanupFragmentationBuffer(void);
     void HandleTimeTick(void);
@@ -407,6 +421,10 @@ private:
     using SendQueueTask = TaskletIn<Ip6, &Ip6::HandleSendQueue>;
 
     bool mIsReceiveIp6FilterEnabled;
+
+#if OPENTHREAD_CONFIG_REFERENCE_DEVICE_ENABLE
+    bool mTmfOriginFilterEnabled : 1;
+#endif
 
     Callback<otIp6ReceiveCallback> mReceiveIp6DatagramCallback;
 

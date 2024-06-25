@@ -41,6 +41,7 @@
 #include "common/encoding.hpp"
 #include "common/locator_getters.hpp"
 #include "common/log.hpp"
+#include "common/numeric_limits.hpp"
 #include "common/random.hpp"
 #include "instance/instance.hpp"
 #include "mac/mac.hpp"
@@ -60,6 +61,7 @@ namespace NetworkDiagnostic {
 const char Server::kVendorName[]      = OPENTHREAD_CONFIG_NET_DIAG_VENDOR_NAME;
 const char Server::kVendorModel[]     = OPENTHREAD_CONFIG_NET_DIAG_VENDOR_MODEL;
 const char Server::kVendorSwVersion[] = OPENTHREAD_CONFIG_NET_DIAG_VENDOR_SW_VERSION;
+const char Server::kVendorAppUrl[]    = OPENTHREAD_CONFIG_NET_DIAG_VENDOR_APP_URL;
 
 //---------------------------------------------------------------------------------------------------------------------
 // Server
@@ -70,11 +72,13 @@ Server::Server(Instance &aInstance)
     static_assert(sizeof(kVendorName) <= sizeof(VendorNameTlv::StringType), "VENDOR_NAME is too long");
     static_assert(sizeof(kVendorModel) <= sizeof(VendorModelTlv::StringType), "VENDOR_MODEL is too long");
     static_assert(sizeof(kVendorSwVersion) <= sizeof(VendorSwVersionTlv::StringType), "VENDOR_SW_VERSION is too long");
+    static_assert(sizeof(kVendorAppUrl) <= sizeof(VendorAppUrlTlv::StringType), "VENDOR_APP_URL is too long");
 
 #if OPENTHREAD_CONFIG_NET_DIAG_VENDOR_INFO_SET_API_ENABLE
     memcpy(mVendorName, kVendorName, sizeof(kVendorName));
     memcpy(mVendorModel, kVendorModel, sizeof(kVendorModel));
     memcpy(mVendorSwVersion, kVendorSwVersion, sizeof(kVendorSwVersion));
+    memcpy(mVendorAppUrl, kVendorAppUrl, sizeof(kVendorAppUrl));
 #endif
 }
 
@@ -93,6 +97,11 @@ Error Server::SetVendorModel(const char *aVendorModel)
 Error Server::SetVendorSwVersion(const char *aVendorSwVersion)
 {
     return StringCopy(mVendorSwVersion, aVendorSwVersion, kStringCheckUtf8Encoding);
+}
+
+Error Server::SetVendorAppUrl(const char *aVendorAppUrl)
+{
+    return StringCopy(mVendorAppUrl, aVendorAppUrl, kStringCheckUtf8Encoding);
 }
 
 #endif
@@ -211,7 +220,7 @@ Error Server::AppendMacCounters(Message &aMessage)
     MacCountersTlv       tlv;
     const otMacCounters &counters = Get<Mac::Mac>().GetCounters();
 
-    memset(&tlv, 0, sizeof(tlv));
+    ClearAllBytes(tlv);
 
     tlv.Init();
     tlv.SetIfInUnknownProtos(counters.mRxOther);
@@ -266,6 +275,15 @@ Error Server::AppendDiagTlv(uint8_t aTlvType, Message &aMessage)
         error = Tlv::Append<ModeTlv>(aMessage, Get<Mle::MleRouter>().GetDeviceMode().Get());
         break;
 
+    case Tlv::kEui64:
+    {
+        Mac::ExtAddress eui64;
+
+        Get<Radio>().GetIeeeEui64(eui64);
+        error = Tlv::Append<Eui64Tlv>(aMessage, eui64);
+        break;
+    }
+
     case Tlv::kVersion:
         error = Tlv::Append<VersionTlv>(aMessage, kThreadVersion);
         break;
@@ -298,6 +316,15 @@ Error Server::AppendDiagTlv(uint8_t aTlvType, Message &aMessage)
         error = AppendMacCounters(aMessage);
         break;
 
+    case Tlv::kMleCounters:
+    {
+        MleCountersTlv tlv;
+
+        tlv.Init(Get<Mle::Mle>().GetCounters());
+        error = tlv.AppendTo(aMessage);
+        break;
+    }
+
     case Tlv::kVendorName:
         error = Tlv::Append<VendorNameTlv>(aMessage, GetVendorName());
         break;
@@ -308,6 +335,10 @@ Error Server::AppendDiagTlv(uint8_t aTlvType, Message &aMessage)
 
     case Tlv::kVendorSwVersion:
         error = Tlv::Append<VendorSwVersionTlv>(aMessage, GetVendorSwVersion());
+        break;
+
+    case Tlv::kVendorAppUrl:
+        error = Tlv::Append<VendorAppUrlTlv>(aMessage, GetVendorAppUrl());
         break;
 
     case Tlv::kThreadStackVersion:
@@ -321,12 +352,9 @@ Error Server::AppendDiagTlv(uint8_t aTlvType, Message &aMessage)
 
         tlv.Init();
 
-        for (uint8_t page = 0; page < static_cast<uint8_t>(sizeof(Radio::kSupportedChannelPages) * CHAR_BIT); page++)
+        for (uint8_t page : Radio::kSupportedChannelPages)
         {
-            if (Radio::kSupportedChannelPages & (1 << page))
-            {
-                tlv.GetChannelPages()[length++] = page;
-            }
+            tlv.GetChannelPages()[length++] = page;
         }
 
         tlv.SetLength(length);
@@ -1189,6 +1217,10 @@ Error Client::GetNextDiagTlv(const Coap::Message &aMessage, Iterator &aIterator,
             SuccessOrExit(error = Tlv::Read<MaxChildTimeoutTlv>(aMessage, offset, aTlvInfo.mData.mMaxChildTimeout));
             break;
 
+        case Tlv::kEui64:
+            SuccessOrExit(error = Tlv::Read<Eui64Tlv>(aMessage, offset, AsCoreType(&aTlvInfo.mData.mEui64)));
+            break;
+
         case Tlv::kVersion:
             SuccessOrExit(error = Tlv::Read<VersionTlv>(aMessage, offset, aTlvInfo.mData.mVersion));
             break;
@@ -1203,6 +1235,10 @@ Error Client::GetNextDiagTlv(const Coap::Message &aMessage, Iterator &aIterator,
 
         case Tlv::kVendorSwVersion:
             SuccessOrExit(error = Tlv::Read<VendorSwVersionTlv>(aMessage, offset, aTlvInfo.mData.mVendorSwVersion));
+            break;
+
+        case Tlv::kVendorAppUrl:
+            SuccessOrExit(error = Tlv::Read<VendorAppUrlTlv>(aMessage, offset, aTlvInfo.mData.mVendorAppUrl));
             break;
 
         case Tlv::kThreadStackVersion:

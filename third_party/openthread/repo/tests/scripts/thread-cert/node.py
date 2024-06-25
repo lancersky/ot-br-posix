@@ -197,6 +197,9 @@ class OtbrDocker:
         self.pexpect.wait()
         self.pexpect.proc.kill()
 
+    def reserve_udp_port(self, port):
+        self.bash(f'socat -u UDP6-LISTEN:{port},bindtodevice=wpan0 - &')
+
     def destroy(self):
         logging.info("Destroying %s", self)
         self._shutdown_docker()
@@ -807,6 +810,18 @@ class NodeImpl:
         results = [line for line in output if self._match_pattern(line, pattern)]
         return results
 
+    def _expect_key_value_pairs(self, pattern, separator=': '):
+        """Expect 'key: value' in multiple lines.
+
+        Returns:
+            Dictionary of the key:value pairs.
+        """
+        result = {}
+        for line in self._expect_results(pattern):
+            key, val = line.split(separator)
+            result.update({key: val})
+        return result
+
     @staticmethod
     def _match_pattern(line, pattern):
         if isinstance(pattern, str):
@@ -1262,7 +1277,7 @@ class NodeImpl:
         self._expect_done()
 
     def srp_client_disable_auto_start_mode(self):
-        self.send_command(f'srp client autostart able')
+        self.send_command(f'srp client autostart disable')
         self._expect_done()
 
     def srp_client_get_server_address(self):
@@ -1389,6 +1404,30 @@ class NodeImpl:
                 return None
 
             raise
+
+    def get_trel_counters(self):
+        cmd = 'trel counters'
+        self.send_command(cmd)
+        result = self._expect_command_output()
+
+        counters = {}
+        for line in result:
+            m = re.match(r'(\w+)\:[^\d]+(\d+)[^\d]+(\d+)(?:[^\d]+(\d+))?', line)
+            if m:
+                groups = m.groups()
+                sub_counters = {
+                    'packets': int(groups[1]),
+                    'bytes': int(groups[2]),
+                }
+                if groups[3]:
+                    sub_counters['failures'] = int(groups[3])
+                counters[groups[0]] = sub_counters
+        return counters
+
+    def reset_trel_counters(self):
+        cmd = 'trel counters reset'
+        self.send_command(cmd)
+        self._expect_done()
 
     def _encode_txt_entry(self, entry):
         """Encodes the TXT entry to the DNS-SD TXT record format as a HEX string.
@@ -1676,6 +1715,10 @@ class NodeImpl:
         self.send_command(cmd)
         self._expect_done()
 
+    def get_key_switch_guardtime(self):
+        self.send_command('keysequence guardtime')
+        return int(self._expect_result(r'\d+'))
+
     def set_key_switch_guardtime(self, key_switch_guardtime):
         cmd = 'keysequence guardtime %d' % key_switch_guardtime
         self.send_command(cmd)
@@ -1771,7 +1814,7 @@ class NodeImpl:
 
     def get_csl_info(self):
         self.send_command('csl')
-        self._expect_done()
+        return self._expect_key_value_pairs(r'\S+')
 
     def set_csl_channel(self, csl_channel):
         self.send_command('csl channel %d' % csl_channel)
@@ -1880,8 +1923,8 @@ class NodeImpl:
         self.send_command(cmd)
         self._expect_done()
 
-    def get_addrs(self):
-        self.send_command('ipaddr')
+    def get_addrs(self, verbose=False):
+        self.send_command('ipaddr' + (' -v' if verbose else ''))
 
         return self._expect_results(r'\S+(:\S*)+')
 
@@ -2177,13 +2220,21 @@ class NodeImpl:
         self.send_command(cmd)
         return self._expect_command_output()[0]
 
-    def get_netdata_non_nat64_prefixes(self):
-        prefixes = []
+    def get_netdata_non_nat64_routes(self):
+        nat64_routes = []
         routes = self.get_routes()
         for route in routes:
             if 'n' not in route.split(' ')[1]:
-                prefixes.append(route.split(' ')[0])
-        return prefixes
+                nat64_routes.append(route.split(' ')[0])
+        return nat64_routes
+
+    def get_netdata_nat64_routes(self):
+        nat64_routes = []
+        routes = self.get_routes()
+        for route in routes:
+            if 'n' in route.split(' ')[1]:
+                nat64_routes.append(route.split(' ')[0])
+        return nat64_routes
 
     def get_br_nat64_prefix(self):
         cmd = 'br nat64prefix local'
@@ -2301,14 +2352,6 @@ class NodeImpl:
                 }
                 continue
         return {'protocol': protocol_counters, 'errors': error_counters}
-
-    def get_netdata_nat64_prefix(self):
-        prefixes = []
-        routes = self.get_routes()
-        for route in routes:
-            if 'n' in route.split(' ')[1]:
-                prefixes.append(route.split(' ')[0])
-        return prefixes
 
     def get_prefixes(self):
         return self.get_netdata()['Prefixes']
@@ -2659,7 +2702,7 @@ class NodeImpl:
         self.send_command('dataset commit pending')
         self._expect_done()
 
-    def start_dataset_updater(self, panid=None, channel=None):
+    def start_dataset_updater(self, panid=None, channel=None, security_policy=None, delay=None):
         self.send_command('dataset clear')
         self._expect_done()
 
@@ -2670,6 +2713,18 @@ class NodeImpl:
 
         if channel is not None:
             cmd = 'dataset channel %d' % channel
+            self.send_command(cmd)
+            self._expect_done()
+
+        if security_policy is not None:
+            cmd = 'dataset securitypolicy %d %s ' % (security_policy[0], security_policy[1])
+            if (len(security_policy) >= 3):
+                cmd += '%d ' % (security_policy[2])
+            self.send_command(cmd)
+            self._expect_done()
+
+        if delay is not None:
+            cmd = 'dataset delay %d ' % delay
             self.send_command(cmd)
             self._expect_done()
 
@@ -3558,6 +3613,81 @@ class NodeImpl:
         line = self._expect_command_output()[0]
         return [int(item) for item in line.split()]
 
+    def get_channel_monitor_info(self) -> Dict:
+        """
+        Returns:
+            Dict of channel monitor info, e.g. 
+                {'enabled': '1',
+                 'interval': '41000',
+                 'threshold': '-75',
+                 'window': '960',
+                 'count': '985',
+                 'occupancies': {
+                    '11': '0.00%',
+                    '12': '3.50%',
+                    '13': '9.89%',
+                    '14': '15.36%',
+                    '15': '20.02%',
+                    '16': '21.95%',
+                    '17': '32.71%',
+                    '18': '35.76%',
+                    '19': '37.97%',
+                    '20': '43.68%',
+                    '21': '48.95%',
+                    '22': '54.05%',
+                    '23': '58.65%',
+                    '24': '68.26%',
+                    '25': '66.73%',
+                    '26': '73.12%'
+                    }
+                }
+        """
+        config = {}
+        self.send_command('channel monitor')
+
+        for line in self._expect_results(r'\S+'):
+            if re.match(r'.*:\s.*', line):
+                key, val = line.split(':')
+                config.update({key: val.strip()})
+            elif re.match(r'.*:', line):  # occupancy
+                occ_key, val = line.split(':')
+                val = {}
+                config.update({occ_key: val})
+            elif 'busy' in line:
+                # channel occupancies
+                key = line.split()[1]
+                val = line.split()[3]
+                config[occ_key].update({key: val})
+        return config
+
+    def set_channel_manager_auto_enable(self, enable: bool):
+        self.send_command(f'channel manager auto {int(enable)}')
+        self._expect_done()
+
+    def set_channel_manager_autocsl_enable(self, enable: bool):
+        self.send_command(f'channel manager autocsl {int(enable)}')
+        self._expect_done()
+
+    def set_channel_manager_supported(self, channel_mask: int):
+        self.send_command(f'channel manager supported {int(channel_mask)}')
+        self._expect_done()
+
+    def set_channel_manager_favored(self, channel_mask: int):
+        self.send_command(f'channel manager favored {int(channel_mask)}')
+        self._expect_done()
+
+    def set_channel_manager_interval(self, interval: int):
+        self.send_command(f'channel manager interval {interval}')
+        self._expect_done()
+
+    def set_channel_manager_cca_threshold(self, hex_value: str):
+        self.send_command(f'channel manager threshold {hex_value}')
+        self._expect_done()
+
+    def get_channel_manager_config(self):
+        self.send_command('channel manager')
+        return self._expect_key_value_pairs(r'\S+')
+
 
 class Node(NodeImpl, OtCli):
     pass
@@ -3852,8 +3982,8 @@ interface eth0
         AdvOnLink on;
         AdvAutonomous %s;
         AdvRouterAddr off;
-        AdvPreferredLifetime 40;
-        AdvValidLifetime 60;
+        AdvPreferredLifetime 1800;
+        AdvValidLifetime 1800;
     };
 };
 EOF

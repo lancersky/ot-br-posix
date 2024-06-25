@@ -61,7 +61,7 @@ Error DatasetUpdater::RequestUpdate(const Dataset::Info &aDataset, UpdaterCallba
     VerifyOrExit(!Get<Mle::Mle>().IsDisabled(), error = kErrorInvalidState);
     VerifyOrExit(mDataset == nullptr, error = kErrorBusy);
 
-    VerifyOrExit(!aDataset.IsActiveTimestampPresent() && !aDataset.IsPendingTimestampPresent(),
+    VerifyOrExit(!aDataset.IsPresent<Dataset::kActiveTimestamp>() && !aDataset.IsPresent<Dataset::kPendingTimestamp>(),
                  error = kErrorInvalidArgs);
 
     message = Get<MessagePool>().Allocate(Message::kTypeOther);
@@ -117,13 +117,13 @@ void DatasetUpdater::PreparePendingDataset(void)
         ExitNow(error = kErrorNone);
     }
 
-    IgnoreError(dataset.SetFrom(requestedDataset));
+    SuccessOrExit(dataset.WriteTlvsFrom(requestedDataset));
 
-    if (!requestedDataset.IsDelayPresent())
+    if (!requestedDataset.IsPresent<Dataset::kDelay>())
     {
         uint32_t delay = kDefaultDelay;
 
-        SuccessOrExit(error = dataset.SetTlv(Tlv::kDelayTimer, delay));
+        SuccessOrExit(error = dataset.Write<DelayTimerTlv>(delay));
     }
 
     {
@@ -133,15 +133,20 @@ void DatasetUpdater::PreparePendingDataset(void)
         {
             timestamp = *Get<PendingDatasetManager>().GetTimestamp();
         }
+        else
+        {
+            timestamp.Clear();
+        }
 
         timestamp.AdvanceRandomTicks();
-        dataset.SetTimestamp(Dataset::kPending, timestamp);
+        IgnoreError(dataset.Write<PendingTimestampTlv>(timestamp));
     }
 
     {
-        ActiveTimestampTlv *tlv = dataset.GetTlv<ActiveTimestampTlv>();
+        Timestamp timestamp = dataset.FindTlv(Tlv::kActiveTimestamp)->ReadValueAs<ActiveTimestampTlv>();
 
-        tlv->GetTimestamp().AdvanceRandomTicks();
+        timestamp.AdvanceRandomTicks();
+        IgnoreError(dataset.Write<ActiveTimestampTlv>(timestamp));
     }
 
     SuccessOrExit(error = Get<PendingDatasetManager>().Save(dataset));
@@ -185,8 +190,8 @@ void DatasetUpdater::HandleNotifierEvents(Events aEvents)
             Timestamp requestedDatasetTimestamp;
             Timestamp activeDatasetTimestamp;
 
-            requestedDataset.GetActiveTimestamp(requestedDatasetTimestamp);
-            dataset.GetActiveTimestamp(activeDatasetTimestamp);
+            requestedDataset.Get<MeshCoP::Dataset::kActiveTimestamp>(requestedDatasetTimestamp);
+            dataset.Get<MeshCoP::Dataset::kActiveTimestamp>(activeDatasetTimestamp);
             if (Timestamp::Compare(requestedDatasetTimestamp, activeDatasetTimestamp) <= 0)
             {
                 Finish(kErrorAlready);

@@ -12,9 +12,11 @@ Usage : `br [command] ...`
 - [nat64prefix](#nat64prefix)
 - [omrprefix](#omrprefix)
 - [onlinkprefix](#onlinkprefix)
+- [pd](#pd)
 - [prefixtable](#prefixtable)
 - [rioprf](#rioprf)
 - [routeprf](#routeprf)
+- [routers](#routers)
 - [state](#state)
 
 ## Command Details
@@ -32,9 +34,12 @@ disable
 enable
 omrprefix
 onlinkprefix
+pd
 prefixtable
+raoptions
 rioprf
 routeprf
+routers
 state
 Done
 ```
@@ -174,16 +179,94 @@ fd14:1078:b3d5:b0b0:0:0::/96
 Done
 ```
 
+### pd
+
+Usage: `br pd [enable|disable]`
+
+Enable/Disable the DHCPv6 PD.
+
+```bash
+> br pd enable
+Done
+
+> br pd disable
+Done
+```
+
+Usage: `br pd state`
+
+Get the state of DHCPv6 PD.
+
+`OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE` is required.
+
+- `disabled`: DHCPv6 PD is disabled on the border router.
+- `stopped`: DHCPv6 PD in enabled but won't try to request and publish a prefix.
+- `running`: DHCPv6 PD is enabled and will try to request and publish a prefix.
+
+```bash
+> br pd state
+running
+Done
+```
+
+Usage `br pd omrprefix`
+
+Get the DHCPv6 Prefix Delegation (PD) provided off-mesh-routable (OMR) prefix.
+
+`OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE` is required.
+
+```bash
+> br pd omrprefix
+2001:db8:cafe:0:0/64 lifetime:1800 preferred:1800
+Done
+```
+
 ### prefixtable
 
 Usage: `br prefixtable`
 
 Get the discovered prefixes by Border Routing Manager on the infrastructure link.
 
+Info per prefix entry:
+
+- The prefix
+- Whether the prefix is on-link or route
+- Milliseconds since last received Router Advertisement containing this prefix
+- Prefix lifetime in seconds
+- Preferred lifetime in seconds only if prefix is on-link
+- Route preference (low, med, high) only if prefix is route (not on-link)
+- The router IPv6 address which advertising this prefix
+- Flags in received Router Advertisement header:
+  - M: Managed Address Config flag
+  - O: Other Config flag
+  - Stub: Stub Router flag (indicates whether the router is a stub router)
+
 ```bash
 > br prefixtable
-prefix:fd00:1234:5678:0::/64, on-link:no, ms-since-rx:29526, lifetime:1800, route-prf:med, router:ff02:0:0:0:0:0:0:1
-prefix:1200:abba:baba:0::/64, on-link:yes, ms-since-rx:29527, lifetime:1800, preferred:1800, router:ff02:0:0:0:0:0:0:1
+prefix:fd00:1234:5678:0::/64, on-link:no, ms-since-rx:29526, lifetime:1800, route-prf:med, router:ff02:0:0:0:0:0:0:1 (M:0 O:0 Stub:1)
+prefix:1200:abba:baba:0::/64, on-link:yes, ms-since-rx:29527, lifetime:1800, preferred:1800, router:ff02:0:0:0:0:0:0:1 (M:0 O:0 Stub:1)
+Done
+```
+
+### raoptions
+
+Usage: `br raoptions <options>`
+
+Sets additional options to append at the end of emitted Router Advertisement (RA) messages. `<options>` provided as hex bytes.
+
+```bash
+> br raoptions 0400ff00020001
+Done
+```
+
+### raoptions clear
+
+Usage: `br raoptions clear`
+
+Clear any previously set additional options to append at the end of emitted Router Advertisement (RA) messages.
+
+```bash
+> br raoptions clear
 Done
 ```
 
@@ -252,5 +335,25 @@ Clear a previously set preference value for publishing routes in Thread Network 
 
 ```bash
 > br routeprf clear
+Done
+```
+
+### routers
+
+Usage: `br routers`
+
+Get the list of discovered routers by Border Routing Manager on the infrastructure link.
+
+Info per router:
+
+- The router IPv6 address
+- Flags in received Router Advertisement header:
+  - M: Managed Address Config flag
+  - O: Other Config flag
+  - Stub: Stub Router flag (indicates whether the router is a stub router)
+
+```bash
+> br routers
+ff02:0:0:0:0:0:0:1 (M:0 O:0 Stub:1)
 Done
 ```

@@ -31,6 +31,7 @@
 #include <setjmp.h>
 #include <unistd.h>
 
+#include <openthread/logging.h>
 #include <openthread/platform/misc.h>
 
 #include "openthread-system.h"
@@ -108,3 +109,7 @@ otPlatMcuPowerState otPlatGetMcuPowerState(otInstance *aInstance)
 
     return gPlatMcuPowerState;
 }
+
+#if OPENTHREAD_CONFIG_PLATFORM_LOG_CRASH_DUMP_ENABLE
+otError otPlatLogCrashDump(void) { return OT_ERROR_NONE; }
+#endif

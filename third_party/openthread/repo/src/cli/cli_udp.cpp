@@ -44,10 +44,10 @@ namespace ot {
 namespace Cli {
 
 UdpExample::UdpExample(otInstance *aInstance, OutputImplementer &aOutputImplementer)
-    : Output(aInstance, aOutputImplementer)
+    : Utils(aInstance, aOutputImplementer)
     , mLinkSecurityEnabled(true)
 {
-    memset(&mSocket, 0, sizeof(mSocket));
+    ClearAllBytes(mSocket);
 }
 
 /**
@@ -76,9 +76,8 @@ UdpExample::UdpExample(otInstance *aInstance, OutputImplementer &aOutputImplemen
  * - `port`: UDP port number to bind to. Each of the examples is using port number 1234.
  * @par
  * Assigns an IPv6 address and a port to an open socket, which binds the socket for communication.
- * Assigning the IPv6 address and port is referred to as naming the socket.
+ * Assigning the IPv6 address and port is referred to as naming the socket. @moreinfo{@udp}.
  * @sa otUdpBind
- * @sa @udp
  */
 template <> otError UdpExample::Process<Cmd("bind")>(Arg aArgs[])
 {
@@ -127,17 +126,17 @@ exit:
  * `InvalidState` when the preferred NAT64 prefix is unavailable.
  * @par api_copy
  * #otUdpConnect
- * @sa @udp
+ * @moreinfo{@udp}.
  */
 template <> otError UdpExample::Process<Cmd("connect")>(Arg aArgs[])
 {
     otError    error;
     otSockAddr sockaddr;
-    bool       nat64SynthesizedAddress;
+    bool       nat64Synth;
 
-    SuccessOrExit(
-        error = Interpreter::ParseToIp6Address(GetInstancePtr(), aArgs[0], sockaddr.mAddress, nat64SynthesizedAddress));
-    if (nat64SynthesizedAddress)
+    SuccessOrExit(error = ParseToIp6Address(GetInstancePtr(), aArgs[0], sockaddr.mAddress, nat64Synth));
+
+    if (nat64Synth)
     {
         OutputFormat("Connecting to synthesized IPv6 address: ");
         OutputIp6AddressLine(sockaddr.mAddress);
@@ -244,12 +243,11 @@ exit:
  *   - `-s`: Auto-generated payload with the specified length given in the `value` parameter.
  *   - `-x`: Binary data in hexadecimal representation given in the `value` parameter.
  * @par
- * Sends a UDP message using the socket.
+ * Sends a UDP message using the socket. @moreinfo{@udp}.
  * @csa{udp open}
  * @csa{udp bind}
  * @csa{udp connect}
  * @sa otUdpSend
- * @sa @udp
  */
 template <> otError UdpExample::Process<Cmd("send")>(Arg aArgs[])
 {
@@ -258,7 +256,9 @@ template <> otError UdpExample::Process<Cmd("send")>(Arg aArgs[])
     otMessageInfo     messageInfo;
     otMessageSettings messageSettings = {mLinkSecurityEnabled, OT_MESSAGE_PRIORITY_NORMAL};
 
-    memset(&messageInfo, 0, sizeof(messageInfo));
+    VerifyOrExit(otUdpIsOpen(GetInstancePtr(), &mSocket), error = OT_ERROR_INVALID_STATE);
+
+    ClearAllBytes(messageInfo);
 
     // Possible argument formats:
     //
@@ -269,11 +269,11 @@ template <> otError UdpExample::Process<Cmd("send")>(Arg aArgs[])
 
     if (!aArgs[2].IsEmpty())
     {
-        bool nat64SynthesizedAddress;
+        bool nat64Synth;
 
-        SuccessOrExit(error = Interpreter::ParseToIp6Address(GetInstancePtr(), aArgs[0], messageInfo.mPeerAddr,
-                                                             nat64SynthesizedAddress));
-        if (nat64SynthesizedAddress)
+        SuccessOrExit(error = ParseToIp6Address(GetInstancePtr(), aArgs[0], messageInfo.mPeerAddr, nat64Synth));
+
+        if (nat64Synth)
         {
             OutputFormat("Sending to synthesized IPv6 address: ");
             OutputIp6AddressLine(messageInfo.mPeerAddr);
@@ -361,7 +361,7 @@ template <> otError UdpExample::Process<Cmd("linksecurity")>(Arg aArgs[])
      */
     else
     {
-        error = Interpreter::ParseEnableOrDisable(aArgs[0], mLinkSecurityEnabled);
+        error = ParseEnableOrDisable(aArgs[0], mLinkSecurityEnabled);
     }
 
     return error;
@@ -399,10 +399,7 @@ exit:
 
 otError UdpExample::PrepareHexStringPayload(otMessage &aMessage, const char *aHexString)
 {
-    enum : uint8_t
-    {
-        kBufferSize = 50,
-    };
+    static constexpr uint16_t kBufferSize = 50;
 
     otError  error;
     uint8_t  buf[kBufferSize];
@@ -412,7 +409,7 @@ otError UdpExample::PrepareHexStringPayload(otMessage &aMessage, const char *aHe
     while (!done)
     {
         length = sizeof(buf);
-        error  = Utils::CmdLineParser::ParseAsHexStringSegment(aHexString, length, buf);
+        error  = ot::Utils::CmdLineParser::ParseAsHexStringSegment(aHexString, length, buf);
 
         VerifyOrExit((error == OT_ERROR_NONE) || (error == OT_ERROR_PENDING));
         done = (error == OT_ERROR_NONE);

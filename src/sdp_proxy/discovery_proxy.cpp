@@ -61,11 +61,28 @@ static inline bool DnsLabelsEqual(const std::string &aLabel1, const std::string 
 DiscoveryProxy::DiscoveryProxy(Ncp::ControllerOpenThread &aNcp, Mdns::Publisher &aPublisher)
     : mNcp(aNcp)
     , mMdnsPublisher(aPublisher)
+    , mIsEnabled(false)
 {
     mNcp.RegisterResetHandler([this]() {
         otDnssdQuerySetCallbacks(mNcp.GetInstance(), &DiscoveryProxy::OnDiscoveryProxySubscribe,
                                  &DiscoveryProxy::OnDiscoveryProxyUnsubscribe, this);
     });
+}
+
+void DiscoveryProxy::SetEnabled(bool aIsEnabled)
+{
+    VerifyOrExit(IsEnabled() != aIsEnabled);
+    mIsEnabled = aIsEnabled;
+    if (mIsEnabled)
+    {
+        Start();
+    }
+    else
+    {
+        Stop();
+    }
+exit:
+    return;
 }
 
 void DiscoveryProxy::Start(void)
@@ -197,11 +214,9 @@ void DiscoveryProxy::OnServiceDiscovered(const std::string                      
         {
         case OT_DNSSD_QUERY_TYPE_BROWSE:
             splitError = SplitFullServiceName(queryName, serviceName, domain);
-            assert(splitError == OTBR_ERROR_NONE);
             break;
         case OT_DNSSD_QUERY_TYPE_RESOLVE:
             splitError = SplitFullServiceInstanceName(queryName, instanceName, serviceName, domain);
-            assert(splitError == OTBR_ERROR_NONE);
             break;
         default:
             splitError = OTBR_ERROR_NOT_FOUND;
@@ -209,6 +224,7 @@ void DiscoveryProxy::OnServiceDiscovered(const std::string                      
         }
         if (splitError != OTBR_ERROR_NONE)
         {
+            // Incoming service/instance was not what current query wanted to see, move on.
             continue;
         }
 
@@ -267,8 +283,13 @@ void DiscoveryProxy::OnHostDiscovered(const std::string                         
         {
             continue;
         }
+
         splitError = SplitFullHostName(queryName, hostName, domain);
-        assert(splitError == OTBR_ERROR_NONE);
+
+        if (splitError != OTBR_ERROR_NONE)
+        {
+            continue;
+        }
 
         if (DnsLabelsEqual(hostName, aHostName))
         {

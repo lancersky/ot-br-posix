@@ -40,6 +40,7 @@
 
 #include <openthread-core-config.h>
 #include <openthread/border_router.h>
+#include <openthread/cli.h>
 #include <openthread/heap.h>
 #include <openthread/tasklet.h>
 #include <openthread/platform/alarm-milli.h>
@@ -53,6 +54,7 @@
 #include "posix/platform/firewall.hpp"
 #include "posix/platform/infra_if.hpp"
 #include "posix/platform/mainloop.hpp"
+#include "posix/platform/mdns_socket.hpp"
 #include "posix/platform/radio_url.hpp"
 #include "posix/platform/udp.hpp"
 
@@ -72,10 +74,7 @@ static void processStateChange(otChangedFlags aFlags, void *aContext)
 #endif
 
 #if OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
-    if (gBackboneNetifIndex != 0)
-    {
-        platformBackboneStateChange(instance, aFlags);
-    }
+    ot::Posix::InfraNetif::Get().HandleBackboneStateChange(instance, aFlags);
 #endif
 }
 #endif
@@ -130,11 +129,21 @@ void otSysSetInfraNetif(const char *aInfraNetifName, int aIcmp6Socket)
 
 void platformInit(otPlatformConfig *aPlatformConfig)
 {
+    CoprocessorType type;
+
 #if OPENTHREAD_POSIX_CONFIG_BACKTRACE_ENABLE
     platformBacktraceInit();
 #endif
 
     platformAlarmInit(aPlatformConfig->mSpeedUpFactor, aPlatformConfig->mRealTimeSignal);
+
+    type = platformSpinelManagerInit(get802154RadioUrl(aPlatformConfig));
+    if (type != OT_COPROCESSOR_RCP)
+    {
+        printf("Only RCP is supported!\n");
+        exit(OT_EXIT_FAILURE);
+    }
+
     platformRadioInit(get802154RadioUrl(aPlatformConfig));
 
     // For Dry-Run option, only init the radio.
@@ -145,13 +154,12 @@ void platformInit(otPlatformConfig *aPlatformConfig)
 #endif
     platformRandomInit();
 
-#if OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
-    platformBackboneInit(aPlatformConfig->mBackboneInterfaceName);
-#endif
-
 #if OPENTHREAD_POSIX_CONFIG_INFRA_IF_ENABLE
     ot::Posix::InfraNetif::Get().Init();
+#endif
 
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE
+    ot::Posix::MdnsSocket::Get().Init();
 #endif
 
     gNetifName[0] = '\0';
@@ -178,16 +186,20 @@ void platformSetUp(otPlatformConfig *aPlatformConfig)
 
     VerifyOrExit(!gDryRun);
 
-#if OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
-    platformBackboneSetUp();
-#endif
-
 #if OPENTHREAD_POSIX_CONFIG_INFRA_IF_ENABLE
     if (aPlatformConfig->mBackboneInterfaceName != nullptr && strlen(aPlatformConfig->mBackboneInterfaceName) > 0)
     {
-        otSysSetInfraNetif(aPlatformConfig->mBackboneInterfaceName,
-                           ot::Posix::InfraNetif::CreateIcmp6Socket(aPlatformConfig->mBackboneInterfaceName));
+        int icmp6Sock = -1;
+
+#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+        icmp6Sock = ot::Posix::InfraNetif::CreateIcmp6Socket(aPlatformConfig->mBackboneInterfaceName);
+#endif
+
+        otSysSetInfraNetif(aPlatformConfig->mBackboneInterfaceName, icmp6Sock);
     }
+#endif
+
+#if OPENTHREAD_POSIX_CONFIG_INFRA_IF_ENABLE
     ot::Posix::InfraNetif::Get().SetUp();
 #endif
 
@@ -197,6 +209,10 @@ void platformSetUp(otPlatformConfig *aPlatformConfig)
 
 #if OPENTHREAD_CONFIG_PLATFORM_UDP_ENABLE
     ot::Posix::Udp::Get().SetUp();
+#endif
+
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE
+    ot::Posix::MdnsSocket::Get().SetUp();
 #endif
 
 #if OPENTHREAD_POSIX_CONFIG_DAEMON_ENABLE
@@ -246,8 +262,8 @@ void platformTearDown(void)
     ot::Posix::InfraNetif::Get().TearDown();
 #endif
 
-#if OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
-    platformBackboneTearDown();
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE
+    ot::Posix::MdnsSocket::Get().TearDown();
 #endif
 
 exit:
@@ -260,6 +276,7 @@ void platformDeinit(void)
     virtualTimeDeinit();
 #endif
     platformRadioDeinit();
+    platformSpinelManagerDeinit();
 
     // For Dry-Run option, only the radio is initialized.
     VerifyOrExit(!gDryRun);
@@ -278,8 +295,8 @@ void platformDeinit(void)
     ot::Posix::InfraNetif::Get().Deinit();
 #endif
 
-#if OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
-    platformBackboneDeinit();
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE
+    ot::Posix::MdnsSocket::Get().Deinit();
 #endif
 
 exit:
@@ -337,6 +354,7 @@ void otSysMainloopUpdate(otInstance *aInstance, otSysMainloopContext *aMainloop)
 #if OPENTHREAD_POSIX_VIRTUAL_TIME
     virtualTimeUpdateFdSet(aMainloop);
 #else
+    platformSpinelManagerUpdateFdSet(aMainloop);
     platformRadioUpdateFdSet(aMainloop);
 #endif
 #if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
@@ -400,6 +418,7 @@ void otSysMainloopProcess(otInstance *aInstance, const otSysMainloopContext *aMa
 #if OPENTHREAD_POSIX_VIRTUAL_TIME
     virtualTimeProcess(aInstance, aMainloop);
 #else
+    platformSpinelManagerProcess(aInstance, aMainloop);
     platformRadioProcess(aInstance, aMainloop);
 #endif
 #if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
@@ -412,3 +431,15 @@ void otSysMainloopProcess(otInstance *aInstance, const otSysMainloopContext *aMa
 }
 
 bool IsSystemDryRun(void) { return gDryRun; }
+
+#if OPENTHREAD_POSIX_CONFIG_DAEMON_ENABLE && OPENTHREAD_POSIX_CONFIG_DAEMON_CLI_ENABLE
+void otSysCliInitUsingDaemon(otInstance *aInstance)
+{
+    otCliInit(
+        aInstance,
+        [](void *aContext, const char *aFormat, va_list aArguments) -> int {
+            return static_cast<ot::Posix::Daemon *>(aContext)->OutputFormatV(aFormat, aArguments);
+        },
+        &ot::Posix::Daemon::Get());
+}
+#endif

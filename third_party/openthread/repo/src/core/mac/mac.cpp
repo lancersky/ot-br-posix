@@ -234,7 +234,7 @@ Error Mac::ConvertBeaconToActiveScanResult(const RxFrame *aBeaconFrame, ActiveSc
     uint16_t             payloadLength;
 #endif
 
-    memset(&aResult, 0, sizeof(ActiveScanResult));
+    ClearAllBytes(aResult);
 
     VerifyOrExit(aBeaconFrame != nullptr, error = kErrorInvalidArgs);
 
@@ -414,7 +414,7 @@ void Mac::SetRxOnWhenIdle(bool aRxOnWhenIdle)
 #endif
     }
 
-    mLinks.SetRxOnWhenBackoff(mRxOnWhenIdle || mPromiscuous);
+    mLinks.SetRxOnWhenIdle(mRxOnWhenIdle || mPromiscuous);
     UpdateIdleMode();
 
 exit:
@@ -1134,9 +1134,13 @@ void Mac::RecordCcaStatus(bool aCcaSuccess, uint8_t aChannel)
     }
 
     // Only track the CCA success rate for frame transmissions
-    // on the PAN channel.
+    // on the PAN channel or the CSL channel.
 
+#if OPENTHREAD_CONFIG_MAC_CSL_RECEIVER_ENABLE
+    if ((aChannel == mPanChannel) || (IsCslEnabled() && (aChannel == mCslChannel)))
+#else
     if (aChannel == mPanChannel)
+#endif
     {
         if (mCcaSampleCount < kMaxCcaSampleCount)
         {
@@ -1310,6 +1314,12 @@ void Mac::HandleTransmitDone(TxFrame &aFrame, RxFrame *aAckFrame, Error aError)
 #endif
 #if OPENTHREAD_FTD && OPENTHREAD_CONFIG_MAC_CSL_TRANSMITTER_ENABLE
                 ProcessCsl(*aAckFrame, dstAddr);
+#endif
+#if OPENTHREAD_CONFIG_MAC_CSL_RECEIVER_ENABLE
+                if (!GetRxOnWhenIdle() && aFrame.GetHeaderIe(CslIe::kHeaderIeId) != nullptr)
+                {
+                    Get<DataPollSender>().ResetKeepAliveTimer();
+                }
 #endif
             }
         }
@@ -1631,7 +1641,7 @@ Error Mac::ProcessReceiveSecurity(RxFrame &aFrame, const Address &aSrcAddr, Neig
 
         if (keySequence > keyManager.GetCurrentKeySequence())
         {
-            keyManager.SetCurrentKeySequence(keySequence);
+            keyManager.SetCurrentKeySequence(keySequence, KeyManager::kApplyKeySwitchGuard);
         }
     }
 
@@ -1658,6 +1668,8 @@ Error Mac::ProcessEnhAckSecurity(TxFrame &aTxFrame, RxFrame &aAckFrame)
 
     VerifyOrExit(aAckFrame.GetSecurityEnabled(), error = kErrorNone);
     VerifyOrExit(aAckFrame.IsVersion2015());
+
+    SuccessOrExit(aAckFrame.ValidatePsdu());
 
     IgnoreError(aAckFrame.GetSecurityLevel(securityLevel));
     VerifyOrExit(securityLevel == Frame::kSecurityEncMic32);
@@ -2101,7 +2113,7 @@ void Mac::SetPromiscuous(bool aPromiscuous)
     mShouldDelaySleep = false;
 #endif
 
-    mLinks.SetRxOnWhenBackoff(mRxOnWhenIdle || mPromiscuous);
+    mLinks.SetRxOnWhenIdle(mRxOnWhenIdle || mPromiscuous);
     UpdateIdleMode();
 }
 
@@ -2151,7 +2163,7 @@ const uint32_t *Mac::GetIndirectRetrySuccessHistogram(uint8_t &aNumberOfEntries)
 }
 #endif
 
-void Mac::ResetRetrySuccessHistogram() { memset(&mRetryHistogram, 0, sizeof(mRetryHistogram)); }
+void Mac::ResetRetrySuccessHistogram() { ClearAllBytes(mRetryHistogram); }
 #endif // OPENTHREAD_CONFIG_MAC_RETRY_SUCCESS_HISTOGRAM_ENABLE
 
 uint8_t Mac::ComputeLinkMargin(int8_t aRss) const { return ot::ComputeLinkMargin(GetNoiseFloor(), aRss); }

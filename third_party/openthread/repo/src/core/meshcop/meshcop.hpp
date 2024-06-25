@@ -37,8 +37,6 @@
 
 #include "openthread-core-config.h"
 
-#include <limits.h>
-
 #include <openthread/commissioner.h>
 #include <openthread/instance.h>
 #include <openthread/joiner.h>
@@ -49,6 +47,7 @@
 #include "common/equatable.hpp"
 #include "common/log.hpp"
 #include "common/message.hpp"
+#include "common/numeric_limits.hpp"
 #include "common/string.hpp"
 #include "mac/mac_types.hpp"
 #include "meshcop/meshcop_tlvs.hpp"
@@ -393,10 +392,10 @@ public:
 private:
     static constexpr uint8_t kPermitAll = 0xff;
 
-    uint8_t GetNumBits(void) const { return (mLength * CHAR_BIT); }
+    uint8_t GetNumBits(void) const { return (mLength * kBitsPerByte); }
 
-    uint8_t BitIndex(uint8_t aBit) const { return (mLength - 1 - (aBit / CHAR_BIT)); }
-    uint8_t BitFlag(uint8_t aBit) const { return static_cast<uint8_t>(1U << (aBit % CHAR_BIT)); }
+    uint8_t BitIndex(uint8_t aBit) const { return (mLength - 1 - (aBit / kBitsPerByte)); }
+    uint8_t BitFlag(uint8_t aBit) const { return static_cast<uint8_t>(1U << (aBit % kBitsPerByte)); }
 
     bool GetBit(uint8_t aBit) const { return (m8[BitIndex(aBit)] & BitFlag(aBit)) != 0; }
     void SetBit(uint8_t aBit) { m8[BitIndex(aBit)] |= BitFlag(aBit); }
@@ -561,22 +560,6 @@ Error GeneratePskc(const char          *aPassPhrase,
  *
  */
 void ComputeJoinerId(const Mac::ExtAddress &aEui64, Mac::ExtAddress &aJoinerId);
-
-#if OT_SHOULD_LOG_AT(OT_LOG_LEVEL_WARN)
-/**
- * Emits a log message indicating an error during a MeshCoP action.
- *
- * Note that log message is emitted only if there is an error, i.e. @p aError is not `kErrorNone`. The log
- * message will have the format "Failed to {aActionText} : {ErrorString}".
- *
- * @param[in] aActionText   A string representing the failed action.
- * @param[in] aError        The error in sending the message.
- *
- */
-void LogError(const char *aActionText, Error aError);
-#else
-inline void LogError(const char *, Error) {}
-#endif
 
 } // namespace MeshCoP
 

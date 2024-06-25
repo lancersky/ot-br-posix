@@ -146,7 +146,7 @@ Error DuaManager::GenerateDomainUnicastAddressIid(void)
     Error   error;
     uint8_t dadCounter = mDadCounter;
 
-    if ((error = Get<Utils::Slaac>().GenerateIid(mDomainUnicastAddress, nullptr, 0, &dadCounter)) == kErrorNone)
+    if ((error = Get<Utils::Slaac>().GenerateIid(mDomainUnicastAddress, dadCounter)) == kErrorNone)
     {
         if (dadCounter != mDadCounter)
         {
@@ -158,7 +158,7 @@ Error DuaManager::GenerateDomainUnicastAddressIid(void)
     }
     else
     {
-        LogWarn("Generate DUA: %s", ErrorToString(error));
+        LogWarnOnError(error, "generate DUA");
     }
 
     return error;
@@ -548,7 +548,7 @@ exit:
         UpdateCheckDelay(kNoBufDelay);
     }
 
-    LogInfo("PerformNextRegistration: %s", ErrorToString(error));
+    LogWarnOnError(error, "perform next registration");
     FreeMessageOnError(message, error);
 }
 

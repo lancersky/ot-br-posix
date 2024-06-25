@@ -70,6 +70,7 @@ enum
     OTBR_OPT_HELP                    = 'h',
     OTBR_OPT_INTERFACE_NAME          = 'I',
     OTBR_OPT_VERBOSE                 = 'v',
+    OTBR_OPT_SYSLOG_DISABLE          = 's',
     OTBR_OPT_VERSION                 = 'V',
     OTBR_OPT_SHORTMAX                = 128,
     OTBR_OPT_RADIO_VERSION,
@@ -78,7 +79,9 @@ enum
     OTBR_OPT_REST_LISTEN_PORT,
 };
 
-static jmp_buf            sResetJump;
+#ifndef __ANDROID__
+static jmp_buf sResetJump;
+#endif
 static otbr::Application *gApp = nullptr;
 
 void                       __gcov_flush();
@@ -88,6 +91,7 @@ static const struct option kOptions[] = {
     {"help", no_argument, nullptr, OTBR_OPT_HELP},
     {"thread-ifname", required_argument, nullptr, OTBR_OPT_INTERFACE_NAME},
     {"verbose", no_argument, nullptr, OTBR_OPT_VERBOSE},
+    {"syslog-disable", no_argument, nullptr, OTBR_OPT_SYSLOG_DISABLE},
     {"version", no_argument, nullptr, OTBR_OPT_VERSION},
     {"radio-version", no_argument, nullptr, OTBR_OPT_RADIO_VERSION},
     {"auto-attach", optional_argument, nullptr, OTBR_OPT_AUTO_ATTACH},
@@ -134,9 +138,10 @@ static std::vector<char *> AppendAutoAttachDisableArg(int argc, char *argv[])
 static void PrintHelp(const char *aProgramName)
 {
     fprintf(stderr,
-            "Usage: %s [-I interfaceName] [-B backboneIfName] [-d DEBUG_LEVEL] [-v] [--auto-attach[=0/1]] RADIO_URL "
-            "[RADIO_URL]\n"
-            "    --auto-attach defaults to 1\n",
+            "Usage: %s [-I interfaceName] [-B backboneIfName] [-d DEBUG_LEVEL] [-v] [-s] [--auto-attach[=0/1]] "
+            "RADIO_URL [RADIO_URL]\n"
+            "    --auto-attach defaults to 1\n"
+            "    -s disables syslog and prints to standard out\n",
             aProgramName);
     fprintf(stderr, "%s", otSysGetRadioUrlHelpString());
 }
@@ -193,6 +198,7 @@ static int realmain(int argc, char *argv[])
     int                       ret               = EXIT_SUCCESS;
     const char               *interfaceName     = kDefaultInterfaceName;
     bool                      verbose           = false;
+    bool                      syslogDisable     = false;
     bool                      printRadioVersion = false;
     bool                      enableAutoAttach  = true;
     const char               *restListenAddress = "";
@@ -203,7 +209,7 @@ static int realmain(int argc, char *argv[])
 
     std::set_new_handler(OnAllocateFailed);
 
-    while ((opt = getopt_long(argc, argv, "B:d:hI:Vv", kOptions, nullptr)) != -1)
+    while ((opt = getopt_long(argc, argv, "B:d:hI:Vvs", kOptions, nullptr)) != -1)
     {
         switch (opt)
         {
@@ -224,6 +230,10 @@ static int realmain(int argc, char *argv[])
 
         case OTBR_OPT_VERBOSE:
             verbose = true;
+            break;
+
+        case OTBR_OPT_SYSLOG_DISABLE:
+            syslogDisable = true;
             break;
 
         case OTBR_OPT_VERSION:
@@ -267,7 +277,7 @@ static int realmain(int argc, char *argv[])
         }
     }
 
-    otbrLogInit(argv[0], logLevel, verbose);
+    otbrLogInit(argv[0], logLevel, verbose, syslogDisable);
     otbrLogNotice("Running %s", OTBR_PACKAGE_VERSION);
     otbrLogNotice("Thread version: %s", otbr::Ncp::ControllerOpenThread::GetThreadVersion());
     otbrLogNotice("Thread interface: %s", interfaceName);
@@ -317,12 +327,19 @@ void otPlatReset(otInstance *aInstance)
     gApp->Deinit();
     gApp = nullptr;
 
+#ifndef __ANDROID__
     longjmp(sResetJump, 1);
     assert(false);
+#else
+    // Exits immediately on Android. The Android system_server will receive the
+    // signal and decide whether (and how) to restart the ot-daemon
+    exit(0);
+#endif
 }
 
 int main(int argc, char *argv[])
 {
+#ifndef __ANDROID__
     if (setjmp(sResetJump))
     {
         std::vector<char *> args = AppendAutoAttachDisableArg(argc, argv);
@@ -334,6 +351,6 @@ int main(int argc, char *argv[])
 
         execvp(args[0], args.data());
     }
-
+#endif
     return realmain(argc, argv);
 }

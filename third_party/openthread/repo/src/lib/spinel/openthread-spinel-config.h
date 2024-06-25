@@ -80,7 +80,37 @@
 #endif
 
 /**
- * @def OPENTHREAD_SPINEL_CONFIG_TX_WAIT_TIME_SECS
+ * @def OPENTHREAD_SPINEL_CONFIG_BROADCAST_IID
+ *
+ * Define broadcast IID for spinel frames dedicated to all hosts in multipan configuration.
+ *
+ */
+#ifndef OPENTHREAD_SPINEL_CONFIG_BROADCAST_IID
+#define OPENTHREAD_SPINEL_CONFIG_BROADCAST_IID SPINEL_HEADER_IID_3
+#endif
+
+/**
+ * @def OPENTHREAD_SPINEL_CONFIG_VENDOR_HOOK_ENABLE
+ *
+ * Enables compilation of vendor specific code for Spinel
+ *
+ */
+#ifndef OPENTHREAD_SPINEL_CONFIG_VENDOR_HOOK_ENABLE
+#define OPENTHREAD_SPINEL_CONFIG_VENDOR_HOOK_ENABLE 0
+#endif
+
+/**
+ * @def OPENTHREAD_SPINEL_CONFIG_VENDOR_HOOK_HEADER
+ *
+ * Header file defining class VendorRadioSpinel
+ *
+ */
+#ifndef OPENTHREAD_SPINEL_CONFIG_VENDOR_HOOK_HEADER
+#define OPENTHREAD_SPINEL_CONFIG_VENDOR_HOOK_HEADER "lib/spinel/example_vendor_hook.hpp"
+#endif
+
+/**
+ * @def OPENTHREAD_SPINEL_CONFIG_RCP_TX_WAIT_TIME_SECS
  *
  * Defines the Tx wait duration in seconds.
  *

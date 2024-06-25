@@ -38,6 +38,7 @@
 #include <openthread/platform/entropy.h>
 #include <openthread/platform/logging.h>
 #include <openthread/platform/misc.h>
+#include <openthread/platform/multipan.h>
 #include <openthread/platform/radio.h>
 #include <openthread/platform/settings.h>
 
@@ -230,6 +231,10 @@ OT_TOOL_WEAK void otPlatLog(otLogLevel aLogLevel, otLogRegion aLogRegion, const 
 
 void otPlatWakeHost(void) {}
 
+otError otPlatMultipanGetActiveInstance(otInstance **) { return OT_ERROR_NOT_IMPLEMENTED; }
+
+otError otPlatMultipanSetActiveInstance(otInstance *, bool) { return OT_ERROR_NOT_IMPLEMENTED; }
+
 void otPlatRadioGetIeeeEui64(otInstance *aInstance, uint8_t *aIeeeEui64)
 {
     OT_UNUSED_VARIABLE(aInstance);
@@ -255,6 +260,12 @@ void otPlatRadioSetShortAddress(otInstance *aInstance, uint16_t aShortAddress)
 }
 
 void otPlatRadioSetPromiscuous(otInstance *aInstance, bool aEnabled)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aEnabled);
+}
+
+void otPlatRadioSetRxOnWhenIdle(otInstance *aInstance, bool aEnabled)
 {
     OT_UNUSED_VARIABLE(aInstance);
     OT_UNUSED_VARIABLE(aEnabled);

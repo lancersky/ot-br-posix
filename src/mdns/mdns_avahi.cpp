@@ -492,6 +492,11 @@ PublisherAvahi::AvahiHostRegistration::~AvahiHostRegistration(void)
     ReleaseGroup(mEntryGroup);
 }
 
+PublisherAvahi::AvahiKeyRegistration::~AvahiKeyRegistration(void)
+{
+    ReleaseGroup(mEntryGroup);
+}
+
 otbrError PublisherAvahi::Start(void)
 {
     otbrError error      = OTBR_ERROR_NONE;
@@ -565,10 +570,6 @@ void PublisherAvahi::HandleGroupState(AvahiEntryGroup *aGroup, AvahiEntryGroupSt
     case AVAHI_ENTRY_GROUP_UNCOMMITED:
     case AVAHI_ENTRY_GROUP_REGISTERING:
         break;
-
-    default:
-        assert(false);
-        break;
     }
 }
 
@@ -576,6 +577,7 @@ void PublisherAvahi::CallHostOrServiceCallback(AvahiEntryGroup *aGroup, otbrErro
 {
     ServiceRegistration *serviceReg;
     HostRegistration    *hostReg;
+    KeyRegistration     *keyReg;
 
     if ((serviceReg = FindServiceRegistration(aGroup)) != nullptr)
     {
@@ -597,6 +599,17 @@ void PublisherAvahi::CallHostOrServiceCallback(AvahiEntryGroup *aGroup, otbrErro
         else
         {
             RemoveHostRegistration(hostReg->mName, aError);
+        }
+    }
+    else if ((keyReg = FindKeyRegistration(aGroup)) != nullptr)
+    {
+        if (aError == OTBR_ERROR_NONE)
+        {
+            keyReg->Complete(aError);
+        }
+        else
+        {
+            RemoveKeyRegistration(keyReg->mName, aError);
         }
     }
     else
@@ -678,10 +691,6 @@ void PublisherAvahi::HandleClientState(AvahiClient *aClient, AvahiClientState aS
 
     case AVAHI_CLIENT_CONNECTING:
         otbrLogInfo("Avahi client is connecting to the server");
-        break;
-
-    default:
-        assert(false);
         break;
     }
 }
@@ -841,6 +850,64 @@ exit:
     std::move(aCallback)(error);
 }
 
+otbrError PublisherAvahi::PublishKeyImpl(const std::string &aName, const KeyData &aKeyData, ResultCallback &&aCallback)
+{
+    otbrError        error      = OTBR_ERROR_NONE;
+    int              avahiError = AVAHI_OK;
+    std::string      fullKeyName;
+    AvahiEntryGroup *group = nullptr;
+
+    VerifyOrExit(mState == State::kReady, error = OTBR_ERROR_INVALID_STATE);
+    VerifyOrExit(mClient != nullptr, error = OTBR_ERROR_INVALID_STATE);
+
+    aCallback = HandleDuplicateKeyRegistration(aName, aKeyData, std::move(aCallback));
+    VerifyOrExit(!aCallback.IsNull());
+
+    VerifyOrExit((group = CreateGroup(mClient)) != nullptr, error = OTBR_ERROR_MDNS);
+
+    fullKeyName = MakeFullKeyName(aName);
+
+    avahiError = avahi_entry_group_add_record(group, AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC, AVAHI_PUBLISH_UNIQUE,
+                                              fullKeyName.c_str(), AVAHI_DNS_CLASS_IN, kDnsKeyRecordType, kDefaultTtl,
+                                              aKeyData.data(), aKeyData.size());
+    VerifyOrExit(avahiError == AVAHI_OK);
+
+    otbrLogInfo("Commit avahi key record for %s", aName.c_str());
+    avahiError = avahi_entry_group_commit(group);
+    VerifyOrExit(avahiError == AVAHI_OK);
+
+    AddKeyRegistration(std::unique_ptr<AvahiKeyRegistration>(
+        new AvahiKeyRegistration(aName, aKeyData, std::move(aCallback), group, this)));
+
+exit:
+    if (avahiError != AVAHI_OK || error != OTBR_ERROR_NONE)
+    {
+        if (avahiError != AVAHI_OK)
+        {
+            error = OTBR_ERROR_MDNS;
+            otbrLogErr("Failed to publish key record - avahi error: %s!", avahi_strerror(avahiError));
+        }
+
+        if (group != nullptr)
+        {
+            ReleaseGroup(group);
+        }
+        std::move(aCallback)(error);
+    }
+    return error;
+}
+
+void PublisherAvahi::UnpublishKey(const std::string &aName, ResultCallback &&aCallback)
+{
+    otbrError error = OTBR_ERROR_NONE;
+
+    VerifyOrExit(mState == Publisher::State::kReady, error = OTBR_ERROR_INVALID_STATE);
+    RemoveKeyRegistration(aName, OTBR_ERROR_ABORTED);
+
+exit:
+    std::move(aCallback)(error);
+}
+
 otbrError PublisherAvahi::TxtDataToAvahiStringList(const TxtData    &aTxtData,
                                                    AvahiStringList  *aBuffer,
                                                    size_t            aBufferSize,
@@ -922,6 +989,23 @@ Publisher::HostRegistration *PublisherAvahi::FindHostRegistration(const AvahiEnt
     return result;
 }
 
+Publisher::KeyRegistration *PublisherAvahi::FindKeyRegistration(const AvahiEntryGroup *aEntryGroup)
+{
+    KeyRegistration *result = nullptr;
+
+    for (const auto &entry : mKeyRegistrations)
+    {
+        const auto &keyReg = static_cast<const AvahiKeyRegistration &>(*entry.second);
+        if (keyReg.GetEntryGroup() == aEntryGroup)
+        {
+            result = entry.second.get();
+            break;
+        }
+    }
+
+    return result;
+}
+
 void PublisherAvahi::SubscribeService(const std::string &aType, const std::string &aInstanceName)
 {
     auto service = MakeUnique<ServiceSubscription>(*this, aType, aInstanceName);
@@ -955,7 +1039,7 @@ void PublisherAvahi::UnsubscribeService(const std::string &aType, const std::str
                           return aService->mType == aType && aService->mInstanceName == aInstanceName;
                       });
 
-    assert(it != mSubscribedServices.end());
+    VerifyOrExit(it != mSubscribedServices.end());
 
     {
         std::unique_ptr<ServiceSubscription> service = std::move(*it);
@@ -1014,7 +1098,7 @@ void PublisherAvahi::UnsubscribeHost(const std::string &aHostName)
         mSubscribedHosts.begin(), mSubscribedHosts.end(),
         [&aHostName](const std::unique_ptr<HostSubscription> &aHost) { return aHost->mHostName == aHostName; });
 
-    assert(it != mSubscribedHosts.end());
+    VerifyOrExit(it != mSubscribedHosts.end());
 
     {
         std::unique_ptr<HostSubscription> host = std::move(*it);
@@ -1238,6 +1322,7 @@ exit:
         {
             avahi_record_browser_free(mRecordBrowser);
             mRecordBrowser = nullptr;
+            mInstanceInfo.mAddresses.clear();
         }
         // NOTE: This `ServiceResolver` object may be freed in `OnServiceResolved`.
         mRecordBrowser = avahi_record_browser_new(mPublisherAvahi->mClient, aInterfaceIndex, AVAHI_PROTO_UNSPEC,
@@ -1299,7 +1384,7 @@ void PublisherAvahi::ServiceResolver::HandleResolveHostResult(AvahiRecordBrowser
             aName, aInterfaceIndex, aProtocol, aClazz, aType, aSize, static_cast<int>(aFlags),
             static_cast<int>(aEvent));
 
-    VerifyOrExit(aEvent == AVAHI_BROWSER_NEW);
+    VerifyOrExit(aEvent == AVAHI_BROWSER_NEW || aEvent == AVAHI_BROWSER_REMOVE);
     VerifyOrExit(aSize == OTBR_IP6_ADDRESS_SIZE || aSize == OTBR_IP4_ADDRESS_SIZE,
                  otbrLogErr("Unexpected address data length: %zu", aSize), avahiError = AVAHI_ERR_INVALID_ADDRESS);
     VerifyOrExit(aSize == OTBR_IP6_ADDRESS_SIZE, otbrLogInfo("IPv4 address ignored"),
@@ -1308,9 +1393,16 @@ void PublisherAvahi::ServiceResolver::HandleResolveHostResult(AvahiRecordBrowser
 
     VerifyOrExit(!address.IsLinkLocal() && !address.IsMulticast() && !address.IsLoopback() && !address.IsUnspecified(),
                  avahiError = AVAHI_ERR_INVALID_ADDRESS);
-    otbrLogInfo("Resolved host address: %s", address.ToString().c_str());
-
-    mInstanceInfo.mAddresses.push_back(std::move(address));
+    otbrLogInfo("Resolved host address: %s %s", aEvent == AVAHI_BROWSER_NEW ? "add" : "remove",
+                address.ToString().c_str());
+    if (aEvent == AVAHI_BROWSER_NEW)
+    {
+        mInstanceInfo.AddAddress(address);
+    }
+    else
+    {
+        mInstanceInfo.RemoveAddress(address);
+    }
     resolved = true;
 
 exit:
@@ -1423,7 +1515,7 @@ void PublisherAvahi::HostSubscription::HandleResolveResult(AvahiRecordBrowser   
             aName, aInterfaceIndex, aProtocol, aClazz, aType, aSize, static_cast<int>(aFlags),
             static_cast<int>(aEvent));
 
-    VerifyOrExit(aEvent == AVAHI_BROWSER_NEW);
+    VerifyOrExit(aEvent == AVAHI_BROWSER_NEW || aEvent == AVAHI_BROWSER_REMOVE);
     VerifyOrExit(aSize == OTBR_IP6_ADDRESS_SIZE || aSize == OTBR_IP4_ADDRESS_SIZE,
                  otbrLogErr("Unexpected address data length: %zu", aSize), avahiError = AVAHI_ERR_INVALID_ADDRESS);
     VerifyOrExit(aSize == OTBR_IP6_ADDRESS_SIZE, otbrLogInfo("IPv4 address ignored"),
@@ -1432,10 +1524,18 @@ void PublisherAvahi::HostSubscription::HandleResolveResult(AvahiRecordBrowser   
 
     VerifyOrExit(!address.IsLinkLocal() && !address.IsMulticast() && !address.IsLoopback() && !address.IsUnspecified(),
                  avahiError = AVAHI_ERR_INVALID_ADDRESS);
-    otbrLogInfo("Resolved host address: %s", address.ToString().c_str());
+    otbrLogInfo("Resolved host address: %s %s", aEvent == AVAHI_BROWSER_NEW ? "add" : "remove",
+                address.ToString().c_str());
 
     mHostInfo.mHostName = std::string(aName) + ".";
-    mHostInfo.mAddresses.push_back(std::move(address));
+    if (aEvent == AVAHI_BROWSER_NEW)
+    {
+        mHostInfo.AddAddress(address);
+    }
+    else
+    {
+        mHostInfo.RemoveAddress(address);
+    }
     mHostInfo.mNetifIndex = static_cast<uint32_t>(aInterfaceIndex);
     // TODO: Use a more proper TTL
     mHostInfo.mTtl = kDefaultTtl;

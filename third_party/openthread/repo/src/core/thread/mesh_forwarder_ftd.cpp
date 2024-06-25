@@ -165,6 +165,7 @@ void MeshForwarder::HandleResolved(const Ip6::Address &aEid, Error aError)
         if (aError != kErrorNone)
         {
             LogMessage(kMessageDrop, message, kErrorAddressQuery);
+            FinalizeMessageDirectTx(message, kErrorAddressQuery);
             mSendQueue.DequeueAndFree(message);
             continue;
         }
@@ -259,7 +260,7 @@ Error MeshForwarder::EvictMessage(Message::Priority aPriority)
 exit:
     if ((error == kErrorNone) && (evict != nullptr))
     {
-        RemoveMessage(*evict);
+        EvictMessage(*evict);
     }
 
     return error;
@@ -342,6 +343,7 @@ void MeshForwarder::RemoveDataResponseMessages(void)
         }
 
         LogMessage(kMessageDrop, message);
+        FinalizeMessageDirectTx(message, kErrorDrop);
         mSendQueue.DequeueAndFree(message);
     }
 }
@@ -511,7 +513,7 @@ Error MeshForwarder::UpdateIp6RouteFtd(const Ip6::Header &aIp6Header, Message &a
     else if (mle.IsRoutingLocator(aIp6Header.GetDestination()))
     {
         uint16_t rloc16 = aIp6Header.GetDestination().GetIid().GetLocator();
-        VerifyOrExit(mle.IsRouterIdValid(Mle::RouterIdFromRloc16(rloc16)), error = kErrorDrop);
+        VerifyOrExit(Mle::IsRouterIdValid(Mle::RouterIdFromRloc16(rloc16)), error = kErrorDrop);
         mMeshDest = rloc16;
     }
     else if (mle.IsAnycastLocator(aIp6Header.GetDestination()))
@@ -625,10 +627,16 @@ Error MeshForwarder::CheckReachability(const FrameData &aFrameData, const Mac::A
 
     error = ip6Headers.DecompressFrom(aFrameData, aMeshAddrs, GetInstance());
 
-    if (error == kErrorNotFound)
+    switch (error)
     {
+    case kErrorNone:
+        break;
+    case kErrorNotFound:
         // Frame may not contain an IPv6 header.
-        ExitNow(error = kErrorNone);
+        error = kErrorNone;
+        OT_FALL_THROUGH;
+    default:
+        ExitNow();
     }
 
     error = Get<Mle::MleRouter>().CheckReachability(aMeshAddrs.mDestination.GetShort(), ip6Headers.GetIp6Header());
@@ -704,13 +712,7 @@ void MeshForwarder::HandleMesh(FrameData &aFrameData, const Mac::Address &aMacSo
         SuccessOrExit(error = meshHeader.AppendTo(*messagePtr));
         SuccessOrExit(error = messagePtr->AppendData(aFrameData));
 
-        messagePtr->SetLinkInfo(aLinkInfo);
-
-#if OPENTHREAD_CONFIG_MULTI_RADIO
-        // We set the received radio type on the message in order for it
-        // to be logged correctly from LogMessage().
-        messagePtr->SetRadioType(static_cast<Mac::RadioType>(aLinkInfo.mRadioType));
-#endif
+        messagePtr->UpdateLinkInfoFrom(aLinkInfo);
 
         LogMessage(kMessageReceive, *messagePtr, kErrorNone, &aMacSource);
 

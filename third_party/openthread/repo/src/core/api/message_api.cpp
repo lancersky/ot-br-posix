@@ -62,6 +62,13 @@ void otMessageSetLoopbackToHostAllowed(otMessage *aMessage, bool aAllowLoopbackT
     return AsCoreType(aMessage).SetLoopbackToHostAllowed(aAllowLoopbackToHost);
 }
 
+bool otMessageIsMulticastLoopEnabled(otMessage *aMessage) { return AsCoreType(aMessage).GetMulticastLoop(); }
+
+void otMessageSetMulticastLoopEnabled(otMessage *aMessage, bool aEnabled)
+{
+    AsCoreType(aMessage).SetMulticastLoop(aEnabled);
+}
+
 otMessageOrigin otMessageGetOrigin(const otMessage *aMessage) { return MapEnum(AsCoreType(aMessage).GetOrigin()); }
 
 void otMessageSetOrigin(otMessage *aMessage, otMessageOrigin aOrigin)
@@ -82,6 +89,11 @@ void otMessageSetDirectTransmission(otMessage *aMessage, bool aEnabled)
 }
 
 int8_t otMessageGetRss(const otMessage *aMessage) { return AsCoreType(aMessage).GetAverageRss(); }
+
+otError otMessageGetThreadLinkInfo(const otMessage *aMessage, otThreadLinkInfo *aLinkInfo)
+{
+    return AsCoreType(aMessage).GetLinkInfo(AsCoreType(aLinkInfo));
+}
 
 otError otMessageAppend(otMessage *aMessage, const void *aBuf, uint16_t aLength)
 {

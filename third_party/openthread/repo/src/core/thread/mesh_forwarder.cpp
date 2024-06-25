@@ -202,7 +202,7 @@ void MeshForwarder::PrepareEmptyFrame(Mac::TxFrame &aFrame, const Mac::Address &
     aFrame.SetPayloadLength(0);
 }
 
-void MeshForwarder::RemoveMessage(Message &aMessage)
+void MeshForwarder::EvictMessage(Message &aMessage)
 {
     PriorityQueue *queue = aMessage.GetPriorityQueue();
 
@@ -216,6 +216,8 @@ void MeshForwarder::RemoveMessage(Message &aMessage)
             IgnoreError(mIndirectSender.RemoveMessageFromSleepyChild(aMessage, child));
         }
 #endif
+
+        FinalizeMessageDirectTx(aMessage, kErrorNoBufs);
 
         if (mSendMessage == &aMessage)
         {
@@ -387,7 +389,7 @@ exit:
         mTxQueueStats.UpdateFor(aMessage);
 #endif
         LogMessage(kMessageQueueMgmtDrop, aMessage);
-        aMessage.ClearDirectTransmission();
+        FinalizeMessageDirectTx(aMessage, kErrorDrop);
         RemoveMessageIfNoPendingTx(aMessage);
     }
 
@@ -518,7 +520,7 @@ void MeshForwarder::ApplyDirectTxQueueLimit(Message &aMessage)
 #endif
 
     LogMessage(kMessageFullQueueDrop, aMessage);
-    aMessage.ClearDirectTransmission();
+    FinalizeMessageDirectTx(aMessage, kErrorDrop);
     RemoveMessageIfNoPendingTx(aMessage);
 
 exit:
@@ -642,6 +644,7 @@ Message *MeshForwarder::PrepareNextDirectTransmission(void)
             mTxQueueStats.UpdateFor(*curMessage);
 #endif
             LogMessage(kMessageDrop, *curMessage, error);
+            FinalizeMessageDirectTx(*curMessage, error);
             mSendQueue.DequeueAndFree(*curMessage);
             continue;
         }
@@ -1157,7 +1160,11 @@ void MeshForwarder::UpdateNeighborLinkFailures(Neighbor &aNeighbor,
         if (aAllowNeighborRemove && (Mle::IsActiveRouter(aNeighbor.GetRloc16())) &&
             (aNeighbor.GetLinkFailures() >= aFailLimit))
         {
+#if OPENTHREAD_FTD
             Get<Mle::MleRouter>().RemoveRouterLink(static_cast<Router &>(aNeighbor));
+#else
+            IgnoreError(Get<Mle::Mle>().BecomeDetached());
+#endif
         }
     }
 }
@@ -1257,9 +1264,6 @@ void MeshForwarder::UpdateSendMessage(Error aFrameTxError, Mac::Address &aMacDes
 
     txError = aFrameTxError;
 
-    mSendMessage->ClearDirectTransmission();
-    mSendMessage->SetOffset(0);
-
     if (aNeighbor != nullptr)
     {
         aNeighbor->GetLinkInfo().AddMessageTxStatus(mSendMessage->GetTxSuccess());
@@ -1285,39 +1289,54 @@ void MeshForwarder::UpdateSendMessage(Error aFrameTxError, Mac::Address &aMacDes
 #endif
 
     LogMessage(kMessageTransmit, *mSendMessage, txError, &aMacDest);
+    FinalizeMessageDirectTx(*mSendMessage, txError);
+    RemoveMessageIfNoPendingTx(*mSendMessage);
 
-    if (mSendMessage->GetType() == Message::kTypeIp6)
+exit:
+    mScheduleTransmissionTask.Post();
+}
+
+void MeshForwarder::FinalizeMessageDirectTx(Message &aMessage, Error aError)
+{
+    // Finalizes the direct transmission of `aMessage`. This can be
+    // triggered by successful delivery (all fragments reaching the
+    // destination), failure of any fragment, queue management
+    // dropping the message, or eviction of message to accommodate
+    // higher priority messages.
+
+    VerifyOrExit(aMessage.IsDirectTransmission());
+
+    aMessage.ClearDirectTransmission();
+    aMessage.SetOffset(0);
+
+    if (aError != kErrorNone)
     {
-        if (mSendMessage->GetTxSuccess())
-        {
-            mIpCounters.mTxSuccess++;
-        }
-        else
-        {
-            mIpCounters.mTxFailure++;
-        }
+        aMessage.SetTxSuccess(false);
     }
 
-    switch (mSendMessage->GetSubType())
+    if (aMessage.GetType() == Message::kTypeIp6)
+    {
+        aMessage.GetTxSuccess() ? mIpCounters.mTxSuccess++ : mIpCounters.mTxFailure++;
+    }
+
+    switch (aMessage.GetSubType())
     {
     case Message::kSubTypeMleDiscoverRequest:
         // Note that `HandleDiscoveryRequestFrameTxDone()` may update
-        // `mSendMessage` and mark it again for direct transmission.
-        Get<Mle::DiscoverScanner>().HandleDiscoveryRequestFrameTxDone(*mSendMessage);
+        // `aMessage` and mark it again for direct transmission.
+        Get<Mle::DiscoverScanner>().HandleDiscoveryRequestFrameTxDone(aMessage, aError);
         break;
 
     case Message::kSubTypeMleChildIdRequest:
-        Get<Mle::Mle>().HandleChildIdRequestTxDone(*mSendMessage);
+        Get<Mle::Mle>().HandleChildIdRequestTxDone(aMessage);
         break;
 
     default:
         break;
     }
 
-    RemoveMessageIfNoPendingTx(*mSendMessage);
-
 exit:
-    mScheduleTransmissionTask.Post();
+    return;
 }
 
 bool MeshForwarder::RemoveMessageIfNoPendingTx(Message &aMessage)
@@ -1419,31 +1438,26 @@ void MeshForwarder::HandleFragment(FrameData            &aFrameData,
     {
         Neighbor *neighbor = Get<NeighborTable>().FindNeighbor(aMacAddrs.mSource, Neighbor::kInStateAnyExceptInvalid);
 
-        if (neighbor != nullptr)
+        if ((neighbor != nullptr) && (fragmentHeader.GetDatagramOffset() == 0))
         {
             uint16_t tag = fragmentHeader.GetDatagramTag();
 
             if (neighbor->IsLastRxFragmentTagSet())
             {
                 VerifyOrExit(!neighbor->IsLastRxFragmentTagAfter(tag), error = kErrorDuplicated);
-
-                if (neighbor->GetLastRxFragmentTag() == tag)
-                {
-                    VerifyOrExit(fragmentHeader.GetDatagramOffset() != 0, error = kErrorDuplicated);
-
-                    // Duplication suppression for a "next fragment" is handled
-                    // by the code below where the the datagram offset is
-                    // checked against the offset of the corresponding message
-                    // (same datagram tag and size) in Reassembly List. Note
-                    // that if there is no matching message in the Reassembly
-                    // List (e.g., in case the message is already fully
-                    // assembled) the received "next fragment" frame would be
-                    // dropped.
-                }
             }
 
             neighbor->SetLastRxFragmentTag(tag);
         }
+
+        // Duplication suppression for a "next fragment" is handled
+        // by the code below where the the datagram offset is
+        // checked against the offset of the corresponding message
+        // (same datagram tag and size) in Reassembly List. Note
+        // that if there is no matching message in the Reassembly
+        // List (e.g., in case the message is already fully
+        // assembled) the received "next fragment" frame would be
+        // dropped.
     }
 
 #endif // OPENTHREAD_CONFIG_MULTI_RADIO
@@ -1463,7 +1477,7 @@ void MeshForwarder::HandleFragment(FrameData            &aFrameData,
 
         message->SetDatagramTag(fragmentHeader.GetDatagramTag());
         message->SetTimestampToNow();
-        message->SetLinkInfo(aLinkInfo);
+        message->UpdateLinkInfoFrom(aLinkInfo);
 
         VerifyOrExit(Get<Ip6::Filter>().Accept(*message), error = kErrorDrop);
 
@@ -1516,9 +1530,7 @@ void MeshForwarder::HandleFragment(FrameData            &aFrameData,
         message->WriteData(message->GetOffset(), aFrameData);
         message->MoveOffset(aFrameData.GetLength());
         message->AddRss(aLinkInfo.GetRss());
-#if OPENTHREAD_CONFIG_MLE_LINK_METRICS_SUBJECT_ENABLE
         message->AddLqi(aLinkInfo.GetLqi());
-#endif
         message->SetTimestampToNow();
     }
 
@@ -1529,7 +1541,7 @@ exit:
         if (message->GetOffset() >= message->GetLength())
         {
             mReassemblyList.Dequeue(*message);
-            IgnoreError(HandleDatagram(*message, aLinkInfo, aMacAddrs.mSource));
+            IgnoreError(HandleDatagram(*message, aMacAddrs.mSource));
         }
     }
     else
@@ -1629,7 +1641,7 @@ void MeshForwarder::HandleLowpanHC(const FrameData      &aFrameData,
 
     SuccessOrExit(error = FrameToMessage(aFrameData, 0, aMacAddrs, message));
 
-    message->SetLinkInfo(aLinkInfo);
+    message->UpdateLinkInfoFrom(aLinkInfo);
 
     VerifyOrExit(Get<Ip6::Filter>().Accept(*message), error = kErrorDrop);
 
@@ -1641,7 +1653,7 @@ exit:
 
     if (error == kErrorNone)
     {
-        IgnoreError(HandleDatagram(*message, aLinkInfo, aMacAddrs.mSource));
+        IgnoreError(HandleDatagram(*message, aMacAddrs.mSource));
     }
     else
     {
@@ -1650,7 +1662,7 @@ exit:
     }
 }
 
-Error MeshForwarder::HandleDatagram(Message &aMessage, const ThreadLinkInfo &aLinkInfo, const Mac::Address &aMacSource)
+Error MeshForwarder::HandleDatagram(Message &aMessage, const Mac::Address &aMacSource)
 {
 #if OPENTHREAD_CONFIG_HISTORY_TRACKER_ENABLE
     Get<Utils::HistoryTracker>().RecordRxMessage(aMessage, aMacSource);
@@ -1666,7 +1678,7 @@ Error MeshForwarder::HandleDatagram(Message &aMessage, const ThreadLinkInfo &aLi
     aMessage.SetLoopbackToHostAllowed(true);
     aMessage.SetOrigin(Message::kOriginThreadNetif);
 
-    return Get<Ip6::Ip6>().HandleDatagram(OwnedPtr<Message>(&aMessage), &aLinkInfo);
+    return Get<Ip6::Ip6>().HandleDatagram(OwnedPtr<Message>(&aMessage));
 }
 
 Error MeshForwarder::GetFramePriority(const FrameData      &aFrameData,

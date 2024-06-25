@@ -31,6 +31,9 @@
  *   This file implements the infrastructure interface for posix.
  */
 
+#ifndef OT_POSIX_PLATFORM_INFRA_IF_HPP_
+#define OT_POSIX_PLATFORM_INFRA_IF_HPP_
+
 #include "openthread-posix-config.h"
 
 #include <net/if.h>
@@ -38,7 +41,10 @@
 #include <openthread/openthread-system.h>
 
 #include "core/common/non_copyable.hpp"
-#include "posix/platform/mainloop.hpp"
+
+#include "logger.hpp"
+#include "mainloop.hpp"
+#include "multicast_routing.hpp"
 
 #if OPENTHREAD_POSIX_CONFIG_INFRA_IF_ENABLE
 
@@ -49,9 +55,11 @@ namespace Posix {
  * Manages infrastructure network interface.
  *
  */
-class InfraNetif : public Mainloop::Source, private NonCopyable
+class InfraNetif : public Mainloop::Source, public Logger<InfraNetif>, private NonCopyable
 {
 public:
+    static const char kLogModuleName[]; ///< Module name used for logging.
+
     /**
      * Updates the fd_set and timeout for mainloop.
      *
@@ -82,7 +90,8 @@ public:
      * Sets the infrastructure network interface.
      *
      * @param[in]  aIfName       A pointer to infrastructure network interface name.
-     * @param[in]  aIcmp6Socket  A SOCK_RAW socket for sending/receiving ICMPv6 messages.
+     * @param[in]  aIcmp6Socket  A SOCK_RAW socket for sending/receiving ICMPv6 messages. If you don't need border
+     *                           routing feature, you can pass in -1.
      *
      */
     void SetInfraNetif(const char *aIfName, int aIcmp6Socket);
@@ -134,6 +143,15 @@ public:
     void CountAddresses(otSysInfraNetIfAddressCounters &aAddressCounters) const;
 
     /**
+     * Handles the backbone state change events.
+     *
+     * @param[in] aInstance  A pointer to the OpenThread instance.
+     * @param[in] aFlags     Flags that denote the state change events.
+     *
+     */
+    void HandleBackboneStateChange(otInstance *aInstance, otChangedFlags aFlags);
+
+    /**
      * Sends an ICMPv6 Neighbor Discovery message on given infrastructure interface.
      *
      * See RFC 4861: https://tools.ietf.org/html/rfc4861.
@@ -177,6 +195,14 @@ public:
     const char *GetNetifName(void) const { return (mInfraIfIndex != 0) ? mInfraIfName : nullptr; }
 
     /**
+     * Gets the infrastructure network interface index.
+     *
+     * @returns The infrastructure network interface index.
+     *
+     */
+    uint32_t GetNetifIndex(void) const { return mInfraIfIndex; }
+
+    /**
      * Gets the infrastructure network interface singleton.
      *
      * @returns The singleton object.
@@ -201,16 +227,33 @@ private:
     static const uint8_t      kValidNat64PrefixLength[];
 
     char     mInfraIfName[IFNAMSIZ];
-    uint32_t mInfraIfIndex       = 0;
-    int      mInfraIfIcmp6Socket = -1;
-    int      mNetLinkSocket      = -1;
+    uint32_t mInfraIfIndex = 0;
 
-    void        ReceiveNetLinkMessage(void);
-    void        ReceiveIcmp6Message(void);
+#ifdef __linux__
+    int mNetLinkSocket = -1;
+#endif
+
+#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+    int mInfraIfIcmp6Socket = -1;
+#endif
+#if OPENTHREAD_POSIX_CONFIG_BACKBONE_ROUTER_MULTICAST_ROUTING_ENABLE
+    MulticastRoutingManager mMulticastRoutingManager;
+#endif
+
+#ifdef __linux__
+    void ReceiveNetLinkMessage(void);
+#endif
+
     bool        HasLinkLocalAddress(void) const;
     static void DiscoverNat64PrefixDone(union sigval sv);
+#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+    void SetInfraNetifIcmp6SocketForBorderRouting(int aIcmp6Socket);
+    void ReceiveIcmp6Message(void);
+#endif
 };
 
 } // namespace Posix
 } // namespace ot
 #endif // OPENTHREAD_POSIX_CONFIG_INFRA_IF_ENABLE
+
+#endif // OT_POSIX_PLATFORM_INFRA_IF_HPP_

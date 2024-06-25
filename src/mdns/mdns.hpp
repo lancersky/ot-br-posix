@@ -36,6 +36,10 @@
 
 #include "openthread-br/config.h"
 
+#ifndef OTBR_ENABLE_MDNS
+#define OTBR_ENABLE_MDNS (OTBR_ENABLE_MDNS_AVAHI || OTBR_ENABLE_MDNS_MDNSSD)
+#endif
+
 #include <functional>
 #include <list>
 #include <map>
@@ -119,6 +123,7 @@ public:
     typedef std::vector<TxtEntry>    TxtList;
     typedef std::vector<std::string> SubTypeList;
     typedef std::vector<Ip6Address>  AddressList;
+    typedef std::vector<uint8_t>     KeyData;
 
     /**
      * This structure represents information of a discovered service instance.
@@ -136,6 +141,9 @@ public:
         uint16_t    mWeight   = 0;       ///< Service weight.
         TxtData     mTxtData;            ///< TXT RDATA bytes.
         uint32_t    mTtl = 0;            ///< Service TTL.
+
+        void AddAddress(const Ip6Address &aAddress) { Publisher::AddAddress(mAddresses, aAddress); }
+        void RemoveAddress(const Ip6Address &aAddress) { Publisher::RemoveAddress(mAddresses, aAddress); }
     };
 
     /**
@@ -148,6 +156,9 @@ public:
         AddressList mAddresses;      ///< IP6 addresses.
         uint32_t    mNetifIndex = 0; ///< Network interface.
         uint32_t    mTtl        = 0; ///< Host TTL.
+
+        void AddAddress(const Ip6Address &aAddress) { Publisher::AddAddress(mAddresses, aAddress); }
+        void RemoveAddress(const Ip6Address &aAddress) { Publisher::RemoveAddress(mAddresses, aAddress); }
     };
 
     /**
@@ -267,6 +278,29 @@ public:
      *
      */
     virtual void UnpublishHost(const std::string &aName, ResultCallback &&aCallback) = 0;
+
+    /**
+     * This method publishes or updates a key record for a name.
+     *
+     * @param[in] aName       The name associated with key record (can be host name or service instance name).
+     * @param[in] aKeyData    The key data to publish.
+     * @param[in] aCallback   The callback for receiving the publishing result.`OTBR_ERROR_NONE` will be
+     *                        returned if the operation is successful and all other values indicate a
+     *                        failure. Specifically, `OTBR_ERROR_DUPLICATED` indicates that the name has
+     *                        already been published and the caller can re-publish with a new name if an
+     *                        alternative name is available/acceptable.
+     *
+     */
+    void PublishKey(const std::string &aName, const KeyData &aKeyData, ResultCallback &&aCallback);
+
+    /**
+     * This method un-publishes a key record
+     *
+     * @param[in] aName      The name associated with key record.
+     * @param[in] aCallback  The callback for receiving the publishing result.
+     *
+     */
+    virtual void UnpublishKey(const std::string &aName, ResultCallback &&aCallback) = 0;
 
     /**
      * This method subscribes a given service or service instance.
@@ -503,15 +537,43 @@ protected:
         void OnComplete(otbrError aError);
     };
 
+    class KeyRegistration : public Registration
+    {
+    public:
+        std::string mName;
+        KeyData     mKeyData;
+
+        KeyRegistration(std::string aName, KeyData aKeyData, ResultCallback &&aCallback, Publisher *aPublisher)
+            : Registration(std::move(aCallback), aPublisher)
+            , mName(std::move(aName))
+            , mKeyData(std::move(aKeyData))
+        {
+        }
+
+        ~KeyRegistration(void) { OnComplete(OTBR_ERROR_ABORTED); }
+
+        void Complete(otbrError aError);
+
+        // Tells whether this `KeyRegistration` object is outdated comparing to the given parameters.
+        bool IsOutdated(const std::string &aName, const KeyData &aKeyData) const;
+
+    private:
+        void OnComplete(otbrError aError);
+    };
+
     using ServiceRegistrationPtr = std::unique_ptr<ServiceRegistration>;
     using ServiceRegistrationMap = std::map<std::string, ServiceRegistrationPtr>;
     using HostRegistrationPtr    = std::unique_ptr<HostRegistration>;
     using HostRegistrationMap    = std::map<std::string, HostRegistrationPtr>;
+    using KeyRegistrationPtr     = std::unique_ptr<KeyRegistration>;
+    using KeyRegistrationMap     = std::map<std::string, KeyRegistrationPtr>;
 
     static SubTypeList SortSubTypeList(SubTypeList aSubTypeList);
     static AddressList SortAddressList(AddressList aAddressList);
+    static std::string MakeFullName(const std::string &aName);
     static std::string MakeFullServiceName(const std::string &aName, const std::string &aType);
-    static std::string MakeFullHostName(const std::string &aName);
+    static std::string MakeFullHostName(const std::string &aName) { return MakeFullName(aName); }
+    static std::string MakeFullKeyName(const std::string &aName) { return MakeFullName(aName); }
 
     virtual otbrError PublishServiceImpl(const std::string &aHostName,
                                          const std::string &aName,
@@ -525,6 +587,8 @@ protected:
                                       const AddressList &aAddresses,
                                       ResultCallback   &&aCallback) = 0;
 
+    virtual otbrError PublishKeyImpl(const std::string &aName, const KeyData &aKeyData, ResultCallback &&aCallback) = 0;
+
     virtual void OnServiceResolveFailedImpl(const std::string &aType,
                                             const std::string &aInstanceName,
                                             int32_t            aErrorCode) = 0;
@@ -536,6 +600,7 @@ protected:
     void AddServiceRegistration(ServiceRegistrationPtr &&aServiceReg);
     void RemoveServiceRegistration(const std::string &aName, const std::string &aType, otbrError aError);
     ServiceRegistration *FindServiceRegistration(const std::string &aName, const std::string &aType);
+    ServiceRegistration *FindServiceRegistration(const std::string &aNameAndType);
 
     void OnServiceResolved(std::string aType, DiscoveredInstanceInfo aInstanceInfo);
     void OnServiceResolveFailed(std::string aType, std::string aInstanceName, int32_t aErrorCode);
@@ -558,9 +623,18 @@ protected:
                                                    const AddressList &aAddresses,
                                                    ResultCallback   &&aCallback);
 
+    ResultCallback HandleDuplicateKeyRegistration(const std::string &aName,
+                                                  const KeyData     &aKeyData,
+                                                  ResultCallback   &&aCallback);
+
     void              AddHostRegistration(HostRegistrationPtr &&aHostReg);
     void              RemoveHostRegistration(const std::string &aName, otbrError aError);
     HostRegistration *FindHostRegistration(const std::string &aName);
+
+    void             AddKeyRegistration(KeyRegistrationPtr &&aKeyReg);
+    void             RemoveKeyRegistration(const std::string &aName, otbrError aError);
+    KeyRegistration *FindKeyRegistration(const std::string &aName);
+    KeyRegistration *FindKeyRegistration(const std::string &aName, const std::string &aType);
 
     static void UpdateMdnsResponseCounters(MdnsResponseCounters &aCounters, otbrError aError);
     static void UpdateEmaLatency(uint32_t &aEmaLatency, uint32_t aLatency, otbrError aError);
@@ -569,13 +643,18 @@ protected:
                                              const std::string &aType,
                                              otbrError          aError);
     void UpdateHostRegistrationEmaLatency(const std::string &aHostName, otbrError aError);
+    void UpdateKeyRegistrationEmaLatency(const std::string &aKeyName, otbrError aError);
     void UpdateServiceInstanceResolutionEmaLatency(const std::string &aInstanceName,
                                                    const std::string &aType,
                                                    otbrError          aError);
     void UpdateHostResolutionEmaLatency(const std::string &aHostName, otbrError aError);
 
+    static void AddAddress(AddressList &aAddressList, const Ip6Address &aAddress);
+    static void RemoveAddress(AddressList &aAddressList, const Ip6Address &aAddress);
+
     ServiceRegistrationMap mServiceRegistrations;
     HostRegistrationMap    mHostRegistrations;
+    KeyRegistrationMap     mKeyRegistrations;
 
     struct DiscoverCallback
     {
@@ -603,6 +682,8 @@ protected:
     std::map<std::pair<std::string, std::string>, Timepoint> mServiceRegistrationBeginTime;
     // host name -> the timepoint to begin host registration
     std::map<std::string, Timepoint> mHostRegistrationBeginTime;
+    // key name -> the timepoint to begin key registration
+    std::map<std::string, Timepoint> mKeyRegistrationBeginTime;
     // {instance name, service type} -> the timepoint to begin service resolution
     std::map<std::pair<std::string, std::string>, Timepoint> mServiceInstanceResolutionBeginTime;
     // host name -> the timepoint to begin host resolution

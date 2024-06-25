@@ -91,7 +91,7 @@
  *
  *   The TID value of zero (0) is used for commands to which a correlated
  *   response is not expected or needed, such as for unsolicited update
- *   commands sent to the host from the NCP
+ *   commands sent to the host from the NCP.
  *
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
  *
@@ -420,7 +420,7 @@
  * Please see section "Spinel definition compatibility guideline" for more details.
  *
  */
-#define SPINEL_RCP_API_VERSION 9
+#define SPINEL_RCP_API_VERSION 10
 
 /**
  * @def SPINEL_MIN_HOST_SUPPORTED_RCP_API_VERSION
@@ -479,6 +479,8 @@
 /// Macro for generating bit masks using bit index from the spec
 #define SPINEL_BIT_MASK(bit_index, field_bit_count) ((1 << ((field_bit_count)-1)) >> (bit_index))
 
+#define SPINEL_BITS_PER_BYTE 8 // Number of bits in a byte
+
 // ----------------------------------------------------------------------------
 
 #if defined(__cplusplus)
@@ -512,6 +514,9 @@ enum
     SPINEL_STATUS_UNKNOWN_NEIGHBOR         = 22, ///< The neighbor is unknown.
     SPINEL_STATUS_NOT_CAPABLE              = 23, ///< The target is not capable of handling requested operation.
     SPINEL_STATUS_RESPONSE_TIMEOUT         = 24, ///< No response received from remote node
+    SPINEL_STATUS_SWITCHOVER_DONE =
+        25, ///< Radio interface switch completed successfully (SPINEL_PROP_MULTIPAN_ACTIVE_INTERFACE)
+    SPINEL_STATUS_SWITCHOVER_FAILED = 26, ///< Radio interface switch failed (SPINEL_PROP_MULTIPAN_ACTIVE_INTERFACE)
 
     SPINEL_STATUS_JOIN__BEGIN = 104,
 
@@ -593,6 +598,7 @@ typedef enum
     SPINEL_NET_ROLE_CHILD    = 1,
     SPINEL_NET_ROLE_ROUTER   = 2,
     SPINEL_NET_ROLE_LEADER   = 3,
+    SPINEL_NET_ROLE_DISABLED = 4,
 } spinel_net_role_t;
 
 typedef enum
@@ -601,6 +607,7 @@ typedef enum
     SPINEL_IPV6_ICMP_PING_OFFLOAD_UNICAST_ONLY   = 1,
     SPINEL_IPV6_ICMP_PING_OFFLOAD_MULTICAST_ONLY = 2,
     SPINEL_IPV6_ICMP_PING_OFFLOAD_ALL            = 3,
+    SPINEL_IPV6_ICMP_PING_OFFLOAD_RLOC_ALOC_ONLY = 4,
 } spinel_ipv6_icmp_ping_offload_mode_t;
 
 typedef enum
@@ -1289,6 +1296,7 @@ enum
     SPINEL_CAP_RCP_API_VERSION          = (SPINEL_CAP_RCP__BEGIN + 0),
     SPINEL_CAP_RCP_MIN_HOST_API_VERSION = (SPINEL_CAP_RCP__BEGIN + 1),
     SPINEL_CAP_RCP_RESET_TO_BOOTLOADER  = (SPINEL_CAP_RCP__BEGIN + 2),
+    SPINEL_CAP_RCP_LOG_CRASH_DUMP       = (SPINEL_CAP_RCP__BEGIN + 3),
     SPINEL_CAP_RCP__END                 = 80,
 
     SPINEL_CAP_OPENTHREAD__BEGIN       = 512,
@@ -1449,8 +1457,6 @@ enum
     /** Format: 'C` - Read-only
      *
      * Provides number of interfaces.
-     *
-     * Currently always reads as 1.
      *
      */
     SPINEL_PROP_INTERFACE_COUNT = 6,
@@ -2129,6 +2135,17 @@ enum
      */
     SPINEL_PROP_MAC_DATA_POLL_PERIOD = SPINEL_PROP_MAC__BEGIN + 10,
 
+    /// MAC RxOnWhenIdle mode
+    /** Format: `b`
+     *
+     * Set to true to enable RxOnWhenIdle or false to disable it.
+     * When True, the radio is expected to stay in receive state during
+     * idle periods. When False, the radio is expected to switch to sleep
+     * state during idle periods.
+     *
+     */
+    SPINEL_PROP_MAC_RX_ON_WHEN_IDLE_MODE = SPINEL_PROP_MAC__BEGIN + 11,
+
     SPINEL_PROP_MAC__END = 0x40,
 
     SPINEL_PROP_MAC_EXT__BEGIN = 0x1300,
@@ -2282,6 +2299,7 @@ enum
      *  SPINEL_NET_ROLE_CHILD    = 1,
      *  SPINEL_NET_ROLE_ROUTER   = 2,
      *  SPINEL_NET_ROLE_LEADER   = 3,
+     *  SPINEL_NET_ROLE_DISABLED = 4,
      *
      */
     SPINEL_PROP_NET_ROLE = SPINEL_PROP_NET__BEGIN + 3,
@@ -3441,6 +3459,7 @@ enum
      *   SPINEL_IPV6_ICMP_PING_OFFLOAD_UNICAST_ONLY   = 1
      *   SPINEL_IPV6_ICMP_PING_OFFLOAD_MULTICAST_ONLY = 2
      *   SPINEL_IPV6_ICMP_PING_OFFLOAD_ALL            = 3
+     *   SPINEL_IPV6_ICMP_PING_OFFLOAD_RLOC_ALOC_ONLY = 4
      *
      * Default value is `NET_IPV6_ICMP_PING_OFFLOAD_DISABLED`.
      *
@@ -4381,6 +4400,16 @@ enum
      */
     SPINEL_PROP_RCP_MIN_HOST_API_VERSION = SPINEL_PROP_RCP__BEGIN + 1,
 
+    /// Crash Dump
+    /** Format: Empty : Write only
+     *
+     * Required capability: SPINEL_CAP_RADIO and SPINEL_CAP_RCP_LOG_CRASH_DUMP.
+     *
+     * Writing to this property instructs the RCP to log a crash dump if available.
+     *
+     */
+    SPINEL_PROP_RCP_LOG_CRASH_DUMP = SPINEL_PROP_RCP__BEGIN + 2,
+
     SPINEL_PROP_RCP__END = 0xFF,
 
     SPINEL_PROP_INTERFACE__BEGIN = 0x100,
@@ -4851,6 +4880,24 @@ enum
 
     SPINEL_PROP_RCP_EXT__END = 0x900,
 
+    SPINEL_PROP_MULTIPAN__BEGIN = 0x900,
+
+    /// Multipan interface selection.
+    /** Format: `C`
+     * Type: Read-Write
+     *
+     * `C`: b[0-1] - Interface id.
+     *      b[7]   - 1: Complete pending radio operation, 0: immediate(force) switch.
+     *
+     * This feature gets or sets the radio interface to be used in multipan configuration
+     *
+     * Default value: 0
+     *
+     */
+    SPINEL_PROP_MULTIPAN_ACTIVE_INTERFACE = SPINEL_PROP_MULTIPAN__BEGIN + 0,
+
+    SPINEL_PROP_MULTIPAN__END = 0x910,
+
     SPINEL_PROP_NEST__BEGIN = 0x3BC0,
 
     SPINEL_PROP_NEST_STREAM_MFG = SPINEL_PROP_NEST__BEGIN + 0,
@@ -4946,6 +4993,7 @@ typedef uint32_t spinel_prop_key_t;
 #define SPINEL_HEADER_IID_SHIFT 4
 #define SPINEL_HEADER_IID_MASK (3 << SPINEL_HEADER_IID_SHIFT)
 #define SPINEL_HEADER_IID(iid) (static_cast<uint8_t>((iid) << SPINEL_HEADER_IID_SHIFT))
+#define SPINEL_HEADER_IID_MAX 3
 
 #define SPINEL_HEADER_IID_0 SPINEL_HEADER_IID(0)
 #define SPINEL_HEADER_IID_1 SPINEL_HEADER_IID(1)
@@ -4966,6 +5014,10 @@ typedef uint32_t spinel_prop_key_t;
 #define SPINEL_BEACON_THREAD_FLAG_JOINABLE (1 << 0)
 
 #define SPINEL_BEACON_THREAD_FLAG_NATIVE (1 << 3)
+
+#define SPINEL_MULTIPAN_INTERFACE_SOFT_SWITCH_SHIFT 7
+#define SPINEL_MULTIPAN_INTERFACE_SOFT_SWITCH_MASK (1 << SPINEL_MULTIPAN_INTERFACE_SOFT_SWITCH_SHIFT)
+#define SPINEL_MULTIPAN_INTERFACE_ID_MASK 0x03
 
 // ----------------------------------------------------------------------------
 

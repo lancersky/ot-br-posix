@@ -36,6 +36,16 @@
 #define CONFIG_MLE_H_
 
 /**
+ * @addtogroup config-mle
+ *
+ * @brief
+ *   This module includes configuration variables for the MLE service.
+ *
+ * @{
+ *
+ */
+
+/**
  * @def OPENTHREAD_CONFIG_MLE_MAX_ROUTERS
  *
  * The maximum number of routers in a Thread network.
@@ -94,12 +104,12 @@
  * Define as 1 to enable feature to set device properties which are used for calculating the local leader weight on a
  * device.
  *
- * It is enabled by default on Thread Version 1.3.1 or later.
+ * It is enabled by default on Thread Version 1.4 or later.
  *
  */
 #ifndef OPENTHREAD_CONFIG_MLE_DEVICE_PROPERTY_LEADER_WEIGHT_ENABLE
 #define OPENTHREAD_CONFIG_MLE_DEVICE_PROPERTY_LEADER_WEIGHT_ENABLE \
-    (OPENTHREAD_CONFIG_THREAD_VERSION >= OT_THREAD_VERSION_1_3_1)
+    (OPENTHREAD_CONFIG_THREAD_VERSION >= OT_THREAD_VERSION_1_4)
 #endif
 
 /**
@@ -337,5 +347,10 @@
 #ifndef OPENTHREAD_CONFIG_MLE_LINK_METRICS_SERIES_MTD
 #define OPENTHREAD_CONFIG_MLE_LINK_METRICS_SERIES_MTD 2
 #endif
+
+/**
+ * @}
+ *
+ */
 
 #endif // CONFIG_MLE_H_

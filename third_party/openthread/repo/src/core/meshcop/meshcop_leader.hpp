@@ -95,7 +95,7 @@ public:
      * @retval the minimal delay timer (in ms).
      *
      */
-    uint32_t GetDelayTimerMinimal(void) const;
+    uint32_t GetDelayTimerMinimal(void) const { return mDelayTimerMinimal; }
 
     /**
      * Sets empty Commissioner Data TLV in the Thread Network Data.

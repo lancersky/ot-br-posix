@@ -33,6 +33,7 @@ set(COMMON_INCLUDES
 set(COMMON_SOURCES
     api/backbone_router_api.cpp
     api/backbone_router_ftd_api.cpp
+    api/ble_secure_api.cpp
     api/border_agent_api.cpp
     api/border_router_api.cpp
     api/border_routing_api.cpp
@@ -61,6 +62,7 @@ set(COMMON_SOURCES
     api/link_metrics_api.cpp
     api/link_raw_api.cpp
     api/logging_api.cpp
+    api/mdns_api.cpp
     api/mesh_diag_api.cpp
     api/message_api.cpp
     api/multi_radio_api.cpp
@@ -85,6 +87,7 @@ set(COMMON_SOURCES
     api/thread_ftd_api.cpp
     api/trel_api.cpp
     api/udp_api.cpp
+    api/verhoeff_checksum_api.cpp
     backbone_router/backbone_tmf.cpp
     backbone_router/bbr_leader.cpp
     backbone_router/bbr_local.cpp
@@ -148,7 +151,6 @@ set(COMMON_SOURCES
     meshcop/dataset_manager.cpp
     meshcop/dataset_manager_ftd.cpp
     meshcop/dataset_updater.cpp
-    meshcop/dtls.cpp
     meshcop/energy_scan_client.cpp
     meshcop/extended_panid.cpp
     meshcop/joiner.cpp
@@ -158,6 +160,8 @@ set(COMMON_SOURCES
     meshcop/meshcop_tlvs.cpp
     meshcop/network_name.cpp
     meshcop/panid_query_client.cpp
+    meshcop/secure_transport.cpp
+    meshcop/tcat_agent.cpp
     meshcop/timestamp.cpp
     net/checksum.cpp
     net/dhcp6_client.cpp
@@ -166,6 +170,7 @@ set(COMMON_SOURCES
     net/dns_dso.cpp
     net/dns_platform.cpp
     net/dns_types.cpp
+    net/dnssd.cpp
     net/dnssd_server.cpp
     net/icmp6.cpp
     net/ip4_types.cpp
@@ -174,17 +179,20 @@ set(COMMON_SOURCES
     net/ip6_filter.cpp
     net/ip6_headers.cpp
     net/ip6_mpl.cpp
+    net/mdns.cpp
     net/nat64_translator.cpp
     net/nd6.cpp
     net/nd_agent.cpp
     net/netif.cpp
     net/sntp_client.cpp
     net/socket.cpp
+    net/srp_advertising_proxy.cpp
     net/srp_client.cpp
     net/srp_server.cpp
     net/tcp6.cpp
     net/tcp6_ext.cpp
     net/udp6.cpp
+    radio/ble_secure.cpp
     radio/radio.cpp
     radio/radio_callbacks.cpp
     radio/radio_platform.cpp
@@ -252,6 +260,7 @@ set(COMMON_SOURCES
     utils/power_calibration.cpp
     utils/slaac_address.cpp
     utils/srp_client_buffers.cpp
+    utils/verhoeff_checksum.cpp
 )
 
 set(RADIO_COMMON_SOURCES

@@ -52,12 +52,13 @@ extern "C" {
  *
  */
 
-#define OT_IP6_PREFIX_SIZE 8                           ///< Size of an IPv6 prefix (bytes)
-#define OT_IP6_PREFIX_BITSIZE (OT_IP6_PREFIX_SIZE * 8) ///< Size of an IPv6 prefix (bits)
-#define OT_IP6_IID_SIZE 8                              ///< Size of an IPv6 Interface Identifier (bytes)
-#define OT_IP6_ADDRESS_SIZE 16                         ///< Size of an IPv6 address (bytes)
-#define OT_IP6_HEADER_SIZE 40                          ///< Size of an IPv6 header (bytes)
-#define OT_IP6_HEADER_PROTO_OFFSET 6                   ///< Offset of the proto field in the IPv6 header (bytes)
+#define OT_IP6_PREFIX_SIZE 8                             ///< Size of an IPv6 prefix (bytes)
+#define OT_IP6_PREFIX_BITSIZE (OT_IP6_PREFIX_SIZE * 8)   ///< Size of an IPv6 prefix (bits)
+#define OT_IP6_IID_SIZE 8                                ///< Size of an IPv6 Interface Identifier (bytes)
+#define OT_IP6_ADDRESS_SIZE 16                           ///< Size of an IPv6 address (bytes)
+#define OT_IP6_ADDRESS_BITSIZE (OT_IP6_ADDRESS_SIZE * 8) ///< Size of an IPv6 address (bits)
+#define OT_IP6_HEADER_SIZE 40                            ///< Size of an IPv6 header (bytes)
+#define OT_IP6_HEADER_PROTO_OFFSET 6                     ///< Offset of the proto field in the IPv6 header (bytes)
 
 /**
  * @struct otIp6InterfaceIdentifier
@@ -189,6 +190,7 @@ typedef struct otNetifAddress
     unsigned int mScopeOverride : 4;      ///< The IPv6 scope of this address.
     bool         mRloc : 1;               ///< TRUE if the address is an RLOC, FALSE otherwise.
     bool         mMeshLocal : 1;          ///< TRUE if the address is mesh-local, FALSE otherwise.
+    bool         mSrpRegistered : 1;      ///< Used by OT core only (indicates whether registered by SRP Client).
     const struct otNetifAddress *mNext;   ///< A pointer to the next network interface address.
 } otNetifAddress;
 
@@ -234,7 +236,6 @@ typedef struct otMessageInfo
     otIp6Address mPeerAddr; ///< The peer IPv6 address.
     uint16_t     mSockPort; ///< The local transport-layer port.
     uint16_t     mPeerPort; ///< The peer transport-layer port.
-    const void  *mLinkInfo; ///< A pointer to link-specific information.
     uint8_t      mHopLimit; ///< The IPv6 Hop Limit value. Only applies if `mAllowZeroHopLimit` is FALSE.
                             ///< If `0`, IPv6 Hop Limit is default value `OPENTHREAD_CONFIG_IP6_HOP_LIMIT_DEFAULT`.
                             ///< Otherwise, specifies the IPv6 Hop Limit.
@@ -477,6 +478,7 @@ typedef struct otIp6AddressInfo
     uint8_t             mPrefixLength;  ///< The prefix length of mAddress if it is a unicast address.
     uint8_t             mScope : 4;     ///< The scope of this address.
     bool                mPreferred : 1; ///< Whether this is a preferred address.
+    bool                mMeshLocal : 1; ///< Whether this is a mesh-local unicast/anycast address.
 } otIp6AddressInfo;
 
 /**
@@ -906,6 +908,8 @@ typedef struct otBorderRoutingCounters
     otPacketsAndBytes mInboundMulticast;  ///< The counters for inbound multicast.
     otPacketsAndBytes mOutboundUnicast;   ///< The counters for outbound unicast.
     otPacketsAndBytes mOutboundMulticast; ///< The counters for outbound multicast.
+    otPacketsAndBytes mInboundInternet;   ///< The counters for inbound Internet when DHCPv6 PD enabled.
+    otPacketsAndBytes mOutboundInternet;  ///< The counters for outbound Internet when DHCPv6 PD enabled.
     uint32_t          mRaRx;              ///< The number of received RA packets.
     uint32_t          mRaTxSuccess;       ///< The number of RA packets successfully transmitted.
     uint32_t          mRaTxFailure;       ///< The number of RA packets failed to transmit.

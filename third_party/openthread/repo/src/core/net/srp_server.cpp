@@ -91,7 +91,7 @@ Server::Server(Instance &aInstance)
     , mOutstandingUpdatesTimer(aInstance)
     , mCompletedUpdateTask(aInstance)
     , mServiceUpdateId(Random::NonCrypto::GetUint32())
-    , mPort(kUdpPortMin)
+    , mPort(kUninitializedPort)
     , mState(kStateDisabled)
     , mAddressMode(kDefaultAddressMode)
     , mAnycastSequenceNumber(0)
@@ -329,7 +329,7 @@ void Server::RemoveHost(Host *aHost, RetainName aRetainName)
 
     if (mServiceUpdateHandler.IsSet())
     {
-        uint32_t updateId = AllocateId();
+        uint32_t updateId = AllocateServiceUpdateId();
 
         LogInfo("SRP update handler is notified (updatedId = %lu)", ToUlong(updateId));
         mServiceUpdateHandler.Invoke(updateId, aHost, static_cast<uint32_t>(kDefaultEventsHandlerTimeout));
@@ -339,6 +339,12 @@ void Server::RemoveHost(Host *aHost, RetainName aRetainName)
         // only when there is system failure of the platform mDNS implementation
         // and in which case the host is not expected to be still registered.
     }
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    else
+    {
+        Get<AdvertisingProxy>().AdvertiseRemovalOf(*aHost);
+    }
+#endif
 
     if (!aRetainName)
     {
@@ -456,7 +462,7 @@ void Server::CommitSrpUpdate(Error                    aError,
     uint32_t grantedKeyLease = 0;
     bool     useShortLease   = aHost.ShouldUseShortLeaseOption();
 
-    if (aError != kErrorNone)
+    if (aError != kErrorNone || (mState != kStateRunning))
     {
         aHost.Free();
         ExitNow();
@@ -525,7 +531,27 @@ void Server::CommitSrpUpdate(Error                    aError,
             if (!aHost.HasService(existingService->GetInstanceName()))
             {
                 aHost.AddService(*existingService);
-                existingService->Log(Service::kKeepUnchanged);
+
+                // If host is deleted we make sure to add any existing
+                // service that is not already included as deleted.
+                // When processing an SRP update message that removes
+                // a host, we construct `aHost` and add any existing
+                // services that we have for the same host name as
+                // deleted. However, due to asynchronous nature
+                // of "update handler" (advertising proxy), by the
+                // time we get the callback to commit `aHost`, there
+                // may be new services added that were not included
+                // when constructing `aHost`.
+
+                if (aHost.IsDeleted() && !existingService->IsDeleted())
+                {
+                    existingService->mIsDeleted = true;
+                    existingService->Log(Service::kRemoveButRetainName);
+                }
+                else
+                {
+                    existingService->Log(Service::kKeepUnchanged);
+                }
             }
             else
             {
@@ -569,7 +595,7 @@ exit:
     }
 }
 
-void Server::SelectPort(void)
+void Server::InitPort(void)
 {
     mPort = kUdpPortMin;
 
@@ -579,31 +605,51 @@ void Server::SelectPort(void)
 
         if (Get<Settings>().Read(info) == kErrorNone)
         {
-            mPort = info.GetPort() + 1;
-            if (mPort < kUdpPortMin || mPort > kUdpPortMax)
-            {
-                mPort = kUdpPortMin;
-            }
+            mPort = info.GetPort();
         }
     }
 #endif
+}
+
+void Server::SelectPort(void)
+{
+    if (mPort == kUninitializedPort)
+    {
+        InitPort();
+    }
+    ++mPort;
+    if (mPort < kUdpPortMin || mPort > kUdpPortMax)
+    {
+        mPort = kUdpPortMin;
+    }
 
     LogInfo("Selected port %u", mPort);
 }
 
 void Server::Start(void)
 {
+    Error error = kErrorNone;
+
     VerifyOrExit(mState == kStateStopped);
 
     mState = kStateRunning;
-    PrepareSocket();
+    SuccessOrExit(error = PrepareSocket());
     LogInfo("Start listening on port %u", mPort);
 
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    Get<AdvertisingProxy>().HandleServerStateChange();
+#endif
+
 exit:
-    return;
+    // Re-enable server to select a new port.
+    if (error != kErrorNone)
+    {
+        Disable();
+        Enable();
+    }
 }
 
-void Server::PrepareSocket(void)
+Error Server::PrepareSocket(void)
 {
     Error error = kErrorNone;
 
@@ -628,9 +674,12 @@ void Server::PrepareSocket(void)
 exit:
     if (error != kErrorNone)
     {
-        LogCrit("Failed to prepare socket: %s", ErrorToString(error));
+        LogWarnOnError(error, "prepare socket");
+        IgnoreError(mSocket.Close());
         Stop();
     }
+
+    return error;
 }
 
 Ip6::Udp::Socket &Server::GetSocket(void)
@@ -659,7 +708,7 @@ void Server::HandleDnssdServerStateChange(void)
 
     if (mState == kStateRunning)
     {
-        PrepareSocket();
+        IgnoreError(PrepareSocket());
     }
 }
 
@@ -707,6 +756,10 @@ void Server::Stop(void)
     LogInfo("Stop listening on %u", mPort);
     IgnoreError(mSocket.Close());
     mHasRegisteredAnyService = false;
+
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    Get<AdvertisingProxy>().HandleServerStateChange();
+#endif
 
 exit:
     return;
@@ -777,6 +830,13 @@ void Server::ProcessDnsUpdate(Message &aMessage, MessageMetadata &aMetadata)
     // Parse lease time and validate signature.
     SuccessOrExit(error = ProcessAdditionalSection(host, aMessage, aMetadata));
 
+#if OPENTHREAD_FTD
+    if (aMetadata.IsDirectRxFromClient())
+    {
+        UpdateAddrResolverCacheTable(*aMetadata.mMessageInfo, *host);
+    }
+#endif
+
     HandleUpdate(*host, aMetadata);
 
 exit:
@@ -796,13 +856,13 @@ exit:
 
 Error Server::ProcessZoneSection(const Message &aMessage, MessageMetadata &aMetadata) const
 {
-    Error    error = kErrorNone;
-    char     name[Dns::Name::kMaxNameSize];
-    uint16_t offset = aMetadata.mOffset;
+    Error             error = kErrorNone;
+    Dns::Name::Buffer name;
+    uint16_t          offset = aMetadata.mOffset;
 
     VerifyOrExit(aMetadata.mDnsHeader.GetZoneRecordCount() == 1, error = kErrorParse);
 
-    SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name, sizeof(name)));
+    SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name));
     // TODO: return `Dns::kResponseNotAuth` for not authorized zone names.
     VerifyOrExit(StringMatch(name, GetDomain(), kStringCaseInsensitiveMatch), error = kErrorSecurity);
     SuccessOrExit(error = aMessage.Read(offset, aMetadata.mDnsZone));
@@ -812,11 +872,7 @@ Error Server::ProcessZoneSection(const Message &aMessage, MessageMetadata &aMeta
     aMetadata.mOffset = offset;
 
 exit:
-    if (error != kErrorNone)
-    {
-        LogWarn("Failed to process DNS Zone section: %s", ErrorToString(error));
-    }
-
+    LogWarnOnError(error, "process DNS Zone section");
     return error;
 }
 
@@ -842,11 +898,7 @@ Error Server::ProcessUpdateSection(Host &aHost, const Message &aMessage, Message
     VerifyOrExit(!HasNameConflictsWith(aHost), error = kErrorDuplicated);
 
 exit:
-    if (error != kErrorNone)
-    {
-        LogWarn("Failed to process DNS Update section: %s", ErrorToString(error));
-    }
-
+    LogWarnOnError(error, "Process DNS Update section");
     return error;
 }
 
@@ -861,10 +913,10 @@ Error Server::ProcessHostDescriptionInstruction(Host                  &aHost,
 
     for (uint16_t numRecords = aMetadata.mDnsHeader.GetUpdateRecordCount(); numRecords > 0; numRecords--)
     {
-        char                name[Dns::Name::kMaxNameSize];
+        Dns::Name::Buffer   name;
         Dns::ResourceRecord record;
 
-        SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name, sizeof(name)));
+        SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name));
 
         SuccessOrExit(error = aMessage.Read(offset, record));
 
@@ -935,11 +987,7 @@ Error Server::ProcessHostDescriptionInstruction(Host                  &aHost,
     // the host is being removed or registered.
 
 exit:
-    if (error != kErrorNone)
-    {
-        LogWarn("Failed to process Host Description instructions: %s", ErrorToString(error));
-    }
-
+    LogWarnOnError(error, "process Host Description instructions");
     return error;
 }
 
@@ -952,9 +1000,9 @@ Error Server::ProcessServiceDiscoveryInstructions(Host                  &aHost,
 
     for (uint16_t numRecords = aMetadata.mDnsHeader.GetUpdateRecordCount(); numRecords > 0; numRecords--)
     {
-        char                            serviceName[Dns::Name::kMaxNameSize];
-        char                            instanceLabel[Dns::Name::kMaxLabelSize];
-        char                            instanceServiceName[Dns::Name::kMaxNameSize];
+        Dns::Name::Buffer               serviceName;
+        Dns::Name::LabelBuffer          instanceLabel;
+        Dns::Name::Buffer               instanceServiceName;
         String<Dns::Name::kMaxNameSize> instanceName;
         Dns::PtrRecord                  ptrRecord;
         const char                     *subServiceName;
@@ -962,7 +1010,7 @@ Error Server::ProcessServiceDiscoveryInstructions(Host                  &aHost,
         bool                            isSubType;
         bool                            isDelete;
 
-        SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, serviceName, sizeof(serviceName)));
+        SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, serviceName));
         VerifyOrExit(Dns::Name::IsSubDomainOf(serviceName, GetDomain()), error = kErrorSecurity);
 
         error = Dns::ResourceRecord::ReadRecord(aMessage, offset, ptrRecord);
@@ -977,8 +1025,7 @@ Error Server::ProcessServiceDiscoveryInstructions(Host                  &aHost,
 
         SuccessOrExit(error);
 
-        SuccessOrExit(error = ptrRecord.ReadPtrName(aMessage, offset, instanceLabel, sizeof(instanceLabel),
-                                                    instanceServiceName, sizeof(instanceServiceName)));
+        SuccessOrExit(error = ptrRecord.ReadPtrName(aMessage, offset, instanceLabel, instanceServiceName));
         instanceName.Append("%s.%s", instanceLabel, instanceServiceName);
 
         // Class None indicates "Delete an RR from an RRset".
@@ -1059,11 +1106,7 @@ Error Server::ProcessServiceDiscoveryInstructions(Host                  &aHost,
     }
 
 exit:
-    if (error != kErrorNone)
-    {
-        LogWarn("Failed to process Service Discovery instructions: %s", ErrorToString(error));
-    }
-
+    LogWarnOnError(error, "process Service Discovery instructions");
     return error;
 }
 
@@ -1076,11 +1119,11 @@ Error Server::ProcessServiceDescriptionInstructions(Host            &aHost,
 
     for (uint16_t numRecords = aMetadata.mDnsHeader.GetUpdateRecordCount(); numRecords > 0; numRecords--)
     {
-        char                name[Dns::Name::kMaxNameSize];
+        Dns::Name::Buffer   name;
         Dns::ResourceRecord record;
         Service            *service;
 
-        SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name, sizeof(name)));
+        SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name));
         SuccessOrExit(error = aMessage.Read(offset, record));
 
         if (record.GetClass() == Dns::ResourceRecord::kClassAny)
@@ -1102,9 +1145,8 @@ Error Server::ProcessServiceDescriptionInstructions(Host            &aHost,
 
         if (record.GetType() == Dns::ResourceRecord::kTypeSrv)
         {
-            Dns::SrvRecord srvRecord;
-            char           hostName[Dns::Name::kMaxNameSize];
-            uint16_t       hostNameLength = sizeof(hostName);
+            Dns::SrvRecord    srvRecord;
+            Dns::Name::Buffer hostName;
 
             VerifyOrExit(record.GetClass() == aMetadata.mDnsZone.GetClass(), error = kErrorFailed);
 
@@ -1113,7 +1155,7 @@ Error Server::ProcessServiceDescriptionInstructions(Host            &aHost,
             SuccessOrExit(error = aMessage.Read(offset, srvRecord));
             offset += sizeof(srvRecord);
 
-            SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, hostName, hostNameLength));
+            SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, hostName));
             VerifyOrExit(Dns::Name::IsSubDomainOf(name, GetDomain()), error = kErrorSecurity);
             VerifyOrExit(aHost.Matches(hostName), error = kErrorFailed);
 
@@ -1163,11 +1205,7 @@ Error Server::ProcessServiceDescriptionInstructions(Host            &aHost,
     aMetadata.mOffset = offset;
 
 exit:
-    if (error != kErrorNone)
-    {
-        LogWarn("Failed to process Service Description instructions: %s", ErrorToString(error));
-    }
-
+    LogWarnOnError(error, "process Service Description instructions");
     return error;
 }
 
@@ -1179,22 +1217,22 @@ bool Server::IsValidDeleteAllRecord(const Dns::ResourceRecord &aRecord)
 
 Error Server::ProcessAdditionalSection(Host *aHost, const Message &aMessage, MessageMetadata &aMetadata) const
 {
-    Error            error = kErrorNone;
-    Dns::OptRecord   optRecord;
-    Dns::LeaseOption leaseOption;
-    Dns::SigRecord   sigRecord;
-    char             name[2]; // The root domain name (".") is expected.
-    uint16_t         offset = aMetadata.mOffset;
-    uint16_t         sigOffset;
-    uint16_t         sigRdataOffset;
-    char             signerName[Dns::Name::kMaxNameSize];
-    uint16_t         signatureLength;
+    Error             error = kErrorNone;
+    Dns::OptRecord    optRecord;
+    Dns::LeaseOption  leaseOption;
+    Dns::SigRecord    sigRecord;
+    char              name[2]; // The root domain name (".") is expected.
+    uint16_t          offset = aMetadata.mOffset;
+    uint16_t          sigOffset;
+    uint16_t          sigRdataOffset;
+    Dns::Name::Buffer signerName;
+    uint16_t          signatureLength;
 
     VerifyOrExit(aMetadata.mDnsHeader.GetAdditionalRecordCount() == 2, error = kErrorFailed);
 
     // EDNS(0) Update Lease Option.
 
-    SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name, sizeof(name)));
+    SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name));
     SuccessOrExit(error = aMessage.Read(offset, optRecord));
 
     SuccessOrExit(error = leaseOption.ReadFrom(aMessage, offset + sizeof(optRecord), optRecord.GetLength()));
@@ -1204,24 +1242,31 @@ Error Server::ProcessAdditionalSection(Host *aHost, const Message &aMessage, Mes
     aHost->SetLease(leaseOption.GetLeaseInterval());
     aHost->SetKeyLease(leaseOption.GetKeyLeaseInterval());
 
+    for (Service &service : aHost->mServices)
+    {
+        if (aHost->GetLease() == 0)
+        {
+            service.mIsDeleted = true;
+        }
+
+        service.mLease    = service.mIsDeleted ? 0 : leaseOption.GetLeaseInterval();
+        service.mKeyLease = leaseOption.GetKeyLeaseInterval();
+    }
+
     // If the client included the short variant of Lease Option,
     // server must also use the short variant in its response.
     aHost->SetUseShortLeaseOption(leaseOption.IsShortVariant());
 
     if (aHost->GetLease() > 0)
     {
-        uint8_t hostAddressesNum;
-
-        aHost->GetAddresses(hostAddressesNum);
-
         // There MUST be at least one valid address if we have nonzero lease.
-        VerifyOrExit(hostAddressesNum > 0, error = kErrorFailed);
+        VerifyOrExit(aHost->mAddresses.GetLength() > 0, error = kErrorFailed);
     }
 
     // SIG(0).
 
     sigOffset = offset;
-    SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name, sizeof(name)));
+    SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, name));
     SuccessOrExit(error = aMessage.Read(offset, sigRecord));
     VerifyOrExit(sigRecord.IsValid(), error = kErrorParse);
 
@@ -1232,7 +1277,7 @@ Error Server::ProcessAdditionalSection(Host *aHost, const Message &aMessage, Mes
     // implemented because the end device may not be able to get
     // the synchronized date/time.
 
-    SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, signerName, sizeof(signerName)));
+    SuccessOrExit(error = Dns::Name::ReadName(aMessage, offset, signerName));
 
     signatureLength = sigRecord.GetLength() - (offset - sigRdataOffset);
     offset += signatureLength;
@@ -1249,11 +1294,7 @@ Error Server::ProcessAdditionalSection(Host *aHost, const Message &aMessage, Mes
     aMetadata.mOffset = offset;
 
 exit:
-    if (error != kErrorNone)
-    {
-        LogWarn("Failed to process DNS Additional section: %s", ErrorToString(error));
-    }
-
+    LogWarnOnError(error, "process DNS Additional section");
     return error;
 }
 
@@ -1300,11 +1341,7 @@ Error Server::VerifySignature(const Host::Key  &aKey,
     error = aKey.Verify(hash, signature);
 
 exit:
-    if (error != kErrorNone)
-    {
-        LogWarn("Failed to verify message signature: %s", ErrorToString(error));
-    }
-
+    LogWarnOnError(error, "verify message signature");
     FreeMessage(signerNameMessage);
     return error;
 }
@@ -1342,6 +1379,7 @@ void Server::HandleUpdate(Host &aHost, const MessageMetadata &aMetadata)
 
         SuccessOrExit(error = service->mServiceName.Set(existingService.GetServiceName()));
         service->mIsDeleted = true;
+        service->mKeyLease  = existingService.mKeyLease;
     }
 
 exit:
@@ -1383,9 +1421,9 @@ void Server::InformUpdateHandlerOrCommit(Error aError, Host &aHost, const Messag
 
             for (const Heap::String &subType : service.mSubTypes)
             {
-                char label[Dns::Name::kMaxLabelSize];
+                Dns::Name::LabelBuffer label;
 
-                IgnoreError(Service::ParseSubTypeServiceName(subType.AsCString(), label, sizeof(label)));
+                IgnoreError(Service::ParseSubTypeServiceName(subType.AsCString(), label));
                 LogInfo("      sub-type: %s", label);
             }
         }
@@ -1412,6 +1450,17 @@ void Server::InformUpdateHandlerOrCommit(Error aError, Host &aHost, const Messag
 
         aError = kErrorNoBufs;
     }
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    else if (aError == kErrorNone)
+    {
+        // Ask `AdvertisingProxy` to advertise the new update.
+        // Proxy will report the outcome by calling
+        // `Server::CommitSrpUpdate()` directly.
+
+        Get<AdvertisingProxy>().Advertise(aHost, aMetadata);
+        ExitNow();
+    }
+#endif
 
     CommitSrpUpdate(aError, aHost, aMetadata);
 
@@ -1423,9 +1472,11 @@ void Server::SendResponse(const Dns::UpdateHeader    &aHeader,
                           Dns::UpdateHeader::Response aResponseCode,
                           const Ip6::MessageInfo     &aMessageInfo)
 {
-    Error             error;
+    Error             error    = kErrorNone;
     Message          *response = nullptr;
     Dns::UpdateHeader header;
+
+    VerifyOrExit(mState == kStateRunning, error = kErrorInvalidState);
 
     response = GetSocket().NewMessage();
     VerifyOrExit(response != nullptr, error = kErrorNoBufs);
@@ -1450,11 +1501,8 @@ void Server::SendResponse(const Dns::UpdateHeader    &aHeader,
     UpdateResponseCounters(aResponseCode);
 
 exit:
-    if (error != kErrorNone)
-    {
-        LogWarn("Failed to send response: %s", ErrorToString(error));
-        FreeMessage(response);
-    }
+    LogWarnOnError(error, "send response");
+    FreeMessageOnError(response, error);
 }
 
 void Server::SendResponse(const Dns::UpdateHeader &aHeader,
@@ -1509,11 +1557,8 @@ void Server::SendResponse(const Dns::UpdateHeader &aHeader,
     UpdateResponseCounters(Dns::UpdateHeader::kResponseSuccess);
 
 exit:
-    if (error != kErrorNone)
-    {
-        LogWarn("Failed to send response: %s", ErrorToString(error));
-        FreeMessage(response);
-    }
+    LogWarnOnError(error, "send response");
+    FreeMessageOnError(response, error);
 }
 
 void Server::HandleUdpReceive(void *aContext, otMessage *aMessage, const otMessageInfo *aMessageInfo)
@@ -1525,10 +1570,8 @@ void Server::HandleUdpReceive(Message &aMessage, const Ip6::MessageInfo &aMessag
 {
     Error error = ProcessMessage(aMessage, aMessageInfo);
 
-    if (error != kErrorNone)
-    {
-        LogInfo("Failed to handle DNS message: %s", ErrorToString(error));
-    }
+    LogWarnOnError(error, "handle DNS message");
+    OT_UNUSED_VARIABLE(error);
 }
 
 Error Server::ProcessMessage(Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
@@ -1736,6 +1779,41 @@ void Server::UpdateResponseCounters(Dns::UpdateHeader::Response aResponseCode)
     }
 }
 
+#if OPENTHREAD_FTD
+void Server::UpdateAddrResolverCacheTable(const Ip6::MessageInfo &aMessageInfo, const Host &aHost)
+{
+    // If message is from a client on mesh, we add all registered
+    // addresses as snooped entries in the address resolver cache
+    // table. We associate the registered addresses with the same
+    // RLOC16 (if any) as the received message's peer IPv6 address.
+
+    uint16_t rloc16;
+
+    VerifyOrExit(aHost.GetLease() != 0);
+    VerifyOrExit(aHost.GetTtl() > 0);
+
+    // If the `LookUp()` call succeeds, the cache entry will be marked
+    // as "cached and in-use". We can mark it as "in-use" early since
+    // the entry will be needed and used soon when sending the SRP
+    // response. This also prevents a snooped cache entry (added for
+    // `GetPeerAddr()` due to rx of the SRP update message) from
+    // being overwritten by `UpdateSnoopedCacheEntry()` calls when
+    // there are limited snoop entries available.
+
+    rloc16 = Get<AddressResolver>().LookUp(aMessageInfo.GetPeerAddr());
+
+    VerifyOrExit(rloc16 != Mac::kShortAddrInvalid);
+
+    for (const Ip6::Address &address : aHost.mAddresses)
+    {
+        Get<AddressResolver>().UpdateSnoopedCacheEntry(address, rloc16, Get<Mle::Mle>().GetRloc16());
+    }
+
+exit:
+    return;
+}
+#endif
+
 //---------------------------------------------------------------------------------------------------------------------
 // Server::Service
 
@@ -1754,6 +1832,15 @@ Error Server::Service::Init(const char *aInstanceName, const char *aInstanceLabe
     mUpdateTime  = aUpdateTime;
     mIsDeleted   = false;
     mIsCommitted = false;
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    mIsRegistered      = false;
+    mIsKeyRegistered   = false;
+    mIsReplaced        = false;
+    mShouldAdvertise   = false;
+    mShouldRegisterKey = false;
+    mAdvId             = kInvalidRequestId;
+    mKeyAdvId          = kInvalidRequestId;
+#endif
 
     mParsedDeleteAllRrset = false;
     mParsedSrv            = false;
@@ -1892,9 +1979,9 @@ void Server::Service::Log(Action aAction) const
 
         for (const Heap::String &subType : mSubTypes)
         {
-            char label[Dns::Name::kMaxLabelSize];
+            Dns::Name::LabelBuffer label;
 
-            IgnoreError(ParseSubTypeServiceName(subType.AsCString(), label, sizeof(label)));
+            IgnoreError(ParseSubTypeServiceName(subType.AsCString(), label));
             LogInfo("  sub-type: %s", subType.AsCString());
         }
     }
@@ -1932,6 +2019,15 @@ Server::Host::Host(Instance &aInstance, TimeMilli aUpdateTime)
     , mUpdateTime(aUpdateTime)
     , mParsedKey(false)
     , mUseShortLeaseOption(false)
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    , mIsRegistered(false)
+    , mIsKeyRegistered(false)
+    , mIsReplaced(false)
+    , mShouldAdvertise(false)
+    , mShouldRegisterKey(false)
+    , mAdvId(kInvalidRequestId)
+    , mKeyAdvId(kInvalidRequestId)
+#endif
 {
 }
 
@@ -2043,12 +2139,18 @@ void Server::Host::RemoveService(Service *aService, RetainName aRetainName, Noti
     VerifyOrExit(aService != nullptr);
 
     aService->mIsDeleted = true;
+    aService->mLease     = 0;
+
+    if (!aRetainName)
+    {
+        aService->mKeyLease = 0;
+    }
 
     aService->Log(aRetainName ? Service::kRemoveButRetainName : Service::kFullyRemove);
 
     if (aNotifyServiceHandler && server.mServiceUpdateHandler.IsSet())
     {
-        uint32_t updateId = server.AllocateId();
+        uint32_t updateId = server.AllocateServiceUpdateId();
 
         LogInfo("SRP update handler is notified (updatedId = %lu)", ToUlong(updateId));
         server.mServiceUpdateHandler.Invoke(updateId, this, static_cast<uint32_t>(kDefaultEventsHandlerTimeout));
@@ -2058,6 +2160,12 @@ void Server::Host::RemoveService(Service *aService, RetainName aRetainName, Noti
         // failure of the platform mDNS implementation and in which case the
         // service is not expected to be still registered.
     }
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    else if (aNotifyServiceHandler)
+    {
+        Get<AdvertisingProxy>().AdvertiseRemovalOf(*aService);
+    }
+#endif
 
     if (!aRetainName)
     {
@@ -2121,7 +2229,7 @@ Server::UpdateMetadata::UpdateMetadata(Instance &aInstance, Host &aHost, const M
     , mNext(nullptr)
     , mExpireTime(TimerMilli::GetNow() + kDefaultEventsHandlerTimeout)
     , mDnsHeader(aMessageMetadata.mDnsHeader)
-    , mId(Get<Server>().AllocateId())
+    , mId(Get<Server>().AllocateServiceUpdateId())
     , mTtlConfig(aMessageMetadata.mTtlConfig)
     , mLeaseConfig(aMessageMetadata.mLeaseConfig)
     , mHost(aHost)

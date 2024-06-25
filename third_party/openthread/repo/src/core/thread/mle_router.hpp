@@ -422,17 +422,6 @@ public:
     void ResolveRoutingLoops(uint16_t aSourceMac, uint16_t aDestRloc16);
 
     /**
-     * Checks if a given Router ID has correct value.
-     *
-     * @param[in]  aRouterId  The Router ID value.
-     *
-     * @retval TRUE   If @p aRouterId is in correct range [0..62].
-     * @retval FALSE  If @p aRouterId is not a valid Router ID.
-     *
-     */
-    static bool IsRouterIdValid(uint8_t aRouterId) { return aRouterId <= kMaxRouterId; }
-
-    /**
      * Fills an ConnectivityTlv.
      *
      * @param[out]  aTlv  A reference to the tlv to be filled.
@@ -660,9 +649,6 @@ private:
     void  HandleDataRequest(RxInfo &aRxInfo);
     void  HandleNetworkDataUpdateRouter(void);
     void  HandleDiscoveryRequest(RxInfo &aRxInfo);
-#if OPENTHREAD_CONFIG_TIME_SYNC_ENABLE
-    void HandleTimeSync(RxInfo &aRxInfo);
-#endif
 
     Error ProcessRouteTlv(const RouteTlv &aRouteTlv, RxInfo &aRxInfo);
     Error ReadAndProcessRouteTlvOnFed(RxInfo &aRxInfo, uint8_t aParentId);
@@ -677,10 +663,10 @@ private:
                                      const Ip6::MessageInfo &aMessageInfo);
     void  SendAddressRelease(void);
     void  SendAdvertisement(void);
-    Error SendLinkAccept(const Ip6::MessageInfo &aMessageInfo,
-                         Neighbor               *aNeighbor,
-                         const TlvList          &aRequestedTlvList,
-                         const RxChallenge      &aChallenge);
+    Error SendLinkAccept(const RxInfo      &aRxInfo,
+                         Neighbor          *aNeighbor,
+                         const TlvList     &aRequestedTlvList,
+                         const RxChallenge &aChallenge);
     void  SendParentResponse(Child *aChild, const RxChallenge &aChallenge, bool aRoutersOnlyRequest);
     Error SendChildIdResponse(Child &aChild);
     Error SendChildUpdateRequest(Child &aChild);
@@ -781,35 +767,9 @@ DeclareTmfHandler(MleRouter, kUriAddressRelease);
 
 #if OPENTHREAD_MTD
 
-class MleRouter : public Mle
-{
-    friend class Mle;
-    friend class ot::Instance;
+typedef Mle MleRouter;
 
-public:
-    explicit MleRouter(Instance &aInstance)
-        : Mle(aInstance)
-    {
-    }
-
-    bool IsSingleton(void) const { return false; }
-
-    uint16_t GetNextHop(uint16_t aDestination) const { return Mle::GetNextHop(aDestination); }
-
-    Error RemoveNeighbor(Neighbor &) { return BecomeDetached(); }
-    void  RemoveRouterLink(Router &) { IgnoreError(BecomeDetached()); }
-
-    static bool IsRouterIdValid(uint8_t aRouterId) { return aRouterId <= kMaxRouterId; }
-
-    Error SendChildUpdateRequest(void) { return Mle::SendChildUpdateRequest(); }
-
-    Error CheckReachability(uint16_t aMeshDest, const Ip6::Header &aIp6Header)
-    {
-        return Mle::CheckReachability(aMeshDest, aIp6Header);
-    }
-};
-
-#endif // OPENTHREAD_MTD
+#endif
 
 } // namespace Mle
 

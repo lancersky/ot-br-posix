@@ -72,6 +72,7 @@
 #include "common/timer.hpp"
 #include "crypto/ecdsa.hpp"
 #include "net/dns_types.hpp"
+#include "net/dnssd.hpp"
 #include "net/ip6.hpp"
 #include "net/ip6_address.hpp"
 #include "net/udp6.hpp"
@@ -101,6 +102,8 @@ class RoutingManager;
 
 namespace Srp {
 
+class AdvertisingProxy;
+
 /**
  * Implements the SRP server.
  *
@@ -112,6 +115,7 @@ class Server : public InstanceLocator, private NonCopyable
     friend class Service;
     friend class Host;
     friend class Dns::ServiceDiscovery::Server;
+    friend class AdvertisingProxy;
 #if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
     friend class BorderRouter::RoutingManager;
 #endif
@@ -127,6 +131,10 @@ class Server : public InstanceLocator, private NonCopyable
         kDoNotNotifyServiceHandler = false,
         kNotifyServiceHandler      = true,
     };
+
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    static constexpr Dnssd::RequestId kInvalidRequestId = 0;
+#endif
 
 public:
     static constexpr uint16_t kUdpPortMin = OPENTHREAD_CONFIG_SRP_SERVER_UDP_PORT_MIN; ///< The reserved min port.
@@ -185,6 +193,7 @@ public:
         friend class LinkedList<Service>;
         friend class LinkedListEntry<Service>;
         friend class Heap::Allocatable<Service>;
+        friend class AdvertisingProxy;
 
     public:
         /**
@@ -407,6 +416,12 @@ public:
         bool  Matches(const char *aInstanceName) const;
         void  Log(Action aAction) const;
 
+        template <uint16_t kLabelSize>
+        static Error ParseSubTypeServiceName(const char *aSubTypeServiceName, char (&aLabel)[kLabelSize])
+        {
+            return ParseSubTypeServiceName(aSubTypeServiceName, aLabel, kLabelSize);
+        }
+
         Service                  *mNext;
         Heap::String              mInstanceName;
         Heap::String              mInstanceLabel;
@@ -426,6 +441,15 @@ public:
         bool                      mParsedDeleteAllRrset : 1;
         bool                      mParsedSrv : 1;
         bool                      mParsedTxt : 1;
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+        bool             mIsRegistered : 1;
+        bool             mIsKeyRegistered : 1;
+        bool             mIsReplaced : 1;
+        bool             mShouldAdvertise : 1;
+        bool             mShouldRegisterKey : 1;
+        Dnssd::RequestId mAdvId;
+        Dnssd::RequestId mKeyAdvId;
+#endif
     };
 
     /**
@@ -441,6 +465,7 @@ public:
         friend class Server;
         friend class LinkedListEntry<Host>;
         friend class Heap::Allocatable<Host>;
+        friend class AdvertisingProxy;
 
     public:
         typedef Crypto::Ecdsa::P256::PublicKey Key; ///< Host key (public ECDSA P256 key).
@@ -597,6 +622,16 @@ public:
         LinkedList<Service>       mServices;
         bool                      mParsedKey : 1;
         bool                      mUseShortLeaseOption : 1; // Use short lease option (lease only 4 bytes).
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+        bool                  mIsRegistered : 1;
+        bool                  mIsKeyRegistered : 1;
+        bool                  mIsReplaced : 1;
+        bool                  mShouldAdvertise : 1;
+        bool                  mShouldRegisterKey : 1;
+        Dnssd::RequestId      mAdvId;
+        Dnssd::RequestId      mKeyAdvId;
+        Dnssd::RequestIdRange mAdvIdRange;
+#endif
     };
 
     /**
@@ -877,6 +912,7 @@ private:
     static constexpr AddressMode kDefaultAddressMode =
         static_cast<AddressMode>(OPENTHREAD_CONFIG_SRP_SERVER_DEFAULT_ADDRESS_MODE);
 
+    static constexpr uint16_t kUninitializedPort      = 0;
     static constexpr uint16_t kAnycastAddressModePort = 53;
 
     // Metadata for a received SRP Update message.
@@ -936,9 +972,11 @@ private:
     void              Disable(void);
     void              Start(void);
     void              Stop(void);
+    void              InitPort(void);
     void              SelectPort(void);
-    void              PrepareSocket(void);
+    Error             PrepareSocket(void);
     Ip6::Udp::Socket &GetSocket(void);
+    LinkedList<Host> &GetHosts(void) { return mHosts; }
 
 #if OPENTHREAD_CONFIG_DNSSD_SERVER_ENABLE
     void  HandleDnssdServerStateChange(void);
@@ -947,7 +985,7 @@ private:
 
     void HandleNetDataPublisherEvent(NetworkData::Publisher::Event aEvent);
 
-    ServiceUpdateId AllocateId(void) { return mServiceUpdateId++; }
+    ServiceUpdateId AllocateServiceUpdateId(void) { return mServiceUpdateId++; }
 
     void  InformUpdateHandlerOrCommit(Error aError, Host &aHost, const MessageMetadata &aMetadata);
     void  CommitSrpUpdate(Error aError, Host &aHost, const MessageMetadata &aMessageMetadata);
@@ -1007,6 +1045,7 @@ private:
     static const char    *AddressModeToString(AddressMode aMode);
 
     void UpdateResponseCounters(Dns::Header::Response aResponseCode);
+    void UpdateAddrResolverCacheTable(const Ip6::MessageInfo &aMessageInfo, const Host &aHost);
 
     using LeaseTimer           = TimerMilliIn<Server, &Server::HandleLeaseTimer>;
     using UpdateTimer          = TimerMilliIn<Server, &Server::HandleOutstandingUpdatesTimer>;

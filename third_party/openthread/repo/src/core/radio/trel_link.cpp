@@ -55,9 +55,9 @@ Link::Link(Instance &aInstance)
     , mTimer(aInstance)
     , mInterface(aInstance)
 {
-    memset(&mTxFrame, 0, sizeof(mTxFrame));
-    memset(&mRxFrame, 0, sizeof(mRxFrame));
-    memset(mAckFrameBuffer, 0, sizeof(mAckFrameBuffer));
+    ClearAllBytes(mTxFrame);
+    ClearAllBytes(mRxFrame);
+    ClearAllBytes(mAckFrameBuffer);
 
     mTxFrame.mPsdu = &mTxPacketBuffer[kMaxHeaderSize];
     mTxFrame.SetLength(0);
@@ -224,7 +224,7 @@ void Link::BeginTransmit(void)
         }
 
         // Prepare the ack frame (FCF followed by sequence number)
-        Encoding::LittleEndian::WriteUint16(fcf, mAckFrameBuffer);
+        LittleEndian::WriteUint16(fcf, mAckFrameBuffer);
         mAckFrameBuffer[sizeof(fcf)] = mTxFrame.GetSequence();
 
         mRxFrame.mPsdu    = mAckFrameBuffer;

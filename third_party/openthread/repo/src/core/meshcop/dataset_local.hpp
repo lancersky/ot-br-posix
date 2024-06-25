@@ -134,13 +134,13 @@ public:
     /**
      * Retrieves the dataset from non-volatile memory.
      *
-     * @param[out]  aDataset  Where to place the dataset.
+     * @param[out]  aDatasetTlvs  Where to place the dataset.
      *
      * @retval kErrorNone      Successfully retrieved the dataset.
      * @retval kErrorNotFound  There is no corresponding dataset stored in non-volatile memory.
      *
      */
-    Error Read(otOperationalDatasetTlvs &aDataset) const;
+    Error Read(Dataset::Tlvs &aDatasetTlvs) const;
 
     /**
      * Returns the local time this dataset was last updated or restored.
@@ -164,13 +164,14 @@ public:
     /**
      * Stores the dataset into non-volatile memory.
      *
-     * @param[in]  aDataset  The Dataset to save as `otOperationalDatasetTlvs`.
+     * @param[in]  aDatasetTlvs  The Dataset to save as `Dataset::Tlvs`.
      *
      * @retval kErrorNone             Successfully saved the dataset.
+     * @retval kErrorInvalidArgs      The dataset TLVs is invalid, its length is longer than `Dataset::kMaxLength`.
      * @retval kErrorNotImplemented   The platform does not implement settings functionality.
      *
      */
-    Error Save(const otOperationalDatasetTlvs &aDataset);
+    Error Save(const Dataset::Tlvs &aDatasetTlvs);
 
     /**
      * Stores the dataset into non-volatile memory.
@@ -184,13 +185,28 @@ public:
     Error Save(const Dataset &aDataset);
 
 private:
-    bool IsActive(void) const { return (mType == Dataset::kActive); }
-    void SetTimestamp(const Dataset &aDataset);
 #if OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE
+    struct SecurelyStoredTlv
+    {
+        Crypto::Storage::KeyRef GetKeyRef(Dataset::Type aType) const
+        {
+            return (aType == Dataset::kActive) ? mActiveKeyRef : mPendingKeyRef;
+        }
+
+        Tlv::Type               mTlvType;
+        Crypto::Storage::KeyRef mActiveKeyRef;
+        Crypto::Storage::KeyRef mPendingKeyRef;
+    };
+
+    static const SecurelyStoredTlv kSecurelyStoredTlvs[];
+
     void MoveKeysToSecureStorage(Dataset &aDataset) const;
     void DestroySecurelyStoredKeys(void) const;
     void EmplaceSecurelyStoredKeys(Dataset &aDataset) const;
 #endif
+
+    bool IsActive(void) const { return (mType == Dataset::kActive); }
+    void SetTimestamp(const Dataset &aDataset);
 
     Timestamp     mTimestamp;            ///< Active or Pending Timestamp
     TimeMilli     mUpdateTime;           ///< Local time last updated

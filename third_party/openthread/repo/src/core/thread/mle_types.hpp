@@ -36,7 +36,6 @@
 
 #include "openthread-core-config.h"
 
-#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -51,6 +50,7 @@
 #include "common/code_utils.hpp"
 #include "common/encoding.hpp"
 #include "common/equatable.hpp"
+#include "common/numeric_limits.hpp"
 #include "common/string.hpp"
 #include "mac/mac_types.hpp"
 #include "meshcop/extended_panid.hpp"
@@ -434,15 +434,9 @@ public:
 };
 
 OT_TOOL_PACKED_BEGIN
-class RouterIdSet : public Equatable<RouterIdSet>
+class RouterIdSet : public Equatable<RouterIdSet>, public Clearable<RouterIdSet>
 {
 public:
-    /**
-     * Clears the Router Id Set.
-     *
-     */
-    void Clear(void) { memset(mRouterIdSet, 0, sizeof(mRouterIdSet)); }
-
     /**
      * Indicates whether or not a Router ID bit is set.
      *
@@ -481,7 +475,7 @@ public:
 private:
     static uint8_t MaskFor(uint8_t aRouterId) { return (0x80 >> (aRouterId % 8)); }
 
-    uint8_t mRouterIdSet[BitVectorBytes(Mle::kMaxRouterId + 1)];
+    uint8_t mRouterIdSet[BytesForBitSize(Mle::kMaxRouterId + 1)];
 } OT_TOOL_PACKED_END;
 
 class TxChallenge;
@@ -615,6 +609,17 @@ inline uint16_t ChildIdFromRloc16(uint16_t aRloc16) { return aRloc16 & kMaxChild
  *
  */
 inline uint8_t RouterIdFromRloc16(uint16_t aRloc16) { return aRloc16 >> kRouterIdOffset; }
+
+/**
+ * Indicates whether or not a given Router ID is valid.
+ *
+ * @param[in]  aRouterId  The Router ID value to check.
+ *
+ * @retval TRUE   If @p aRouterId is in correct range [0..62].
+ * @retval FALSE  If @p aRouterId is not a valid Router ID.
+ *
+ */
+inline bool IsRouterIdValid(uint8_t aRouterId) { return aRouterId <= kMaxRouterId; }
 
 /**
  * Returns whether the two RLOC16 have the same Router ID.

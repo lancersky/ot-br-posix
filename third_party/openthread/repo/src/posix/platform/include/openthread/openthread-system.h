@@ -188,6 +188,14 @@ unsigned int otSysGetThreadNetifIndex(void);
 const char *otSysGetInfraNetifName(void);
 
 /**
+ * Returns the infrastructure network interface index.
+ *
+ * @returns The infrastructure network interface index.
+ *
+ */
+uint32_t otSysGetInfraNetifIndex(void);
+
+/**
  * Returns the radio spinel metrics.
  *
  * @returns The radio spinel metrics.
@@ -237,6 +245,27 @@ void otSysCountInfraNetifAddresses(otSysInfraNetIfAddressCounters *aAddressCount
  *
  */
 void otSysSetInfraNetif(const char *aInfraNetifName, int aIcmp6Socket);
+
+/**
+ * Returns TRUE if the infrastructure interface is running.
+ *
+ * @returns TRUE if the infrastructure interface is running, FALSE if not.
+ *
+ */
+bool otSysInfraIfIsRunning(void);
+
+/**
+ * Initializes the CLI module using the daemon.
+ *
+ * This function initializes the CLI module, and assigns the daemon to handle
+ * the CLI output. This function can be invoked multiple times. The typical use case
+ * is that, after OTBR/vendor_server's CLI output redirection, it uses this API to
+ * restore the original daemon's CLI output.
+ *
+ * @param[in] aInstance  The OpenThread instance structure.
+ *
+ */
+void otSysCliInitUsingDaemon(otInstance *aInstance);
 
 #ifdef __cplusplus
 } // end of extern "C"

@@ -35,7 +35,7 @@
 
 #if OPENTHREAD_CONFIG_MLE_LINK_METRICS_INITIATOR_ENABLE == 0
 #error \
-    "OPENTHREAD_CONFIG_LINK_METRICS_MANAGER_ENABLE can only be used when OPENTHREAD_CONFIG_LINK_METRICS_INITIATOR_ENABLE is true"
+    "OPENTHREAD_CONFIG_LINK_METRICS_MANAGER_ENABLE can only be used when OPENTHREAD_CONFIG_MLE_LINK_METRICS_INITIATOR_ENABLE is true"
 #endif
 
 #include <openthread/link_metrics.h>
@@ -150,6 +150,15 @@ public:
      *
      */
     explicit LinkMetricsManager(Instance &aInstance);
+
+    /**
+     * Is the LinkMetricsManager feature enabled.
+     *
+     * @retval TRUE   Link Metrics Manager is enabled.
+     * @retval FALSE  Link Metrics Manager is not enabled.
+     *
+     */
+    bool IsEnabled(void) { return mEnabled; }
 
     /**
      * Enable/Disable the LinkMetricsManager feature.

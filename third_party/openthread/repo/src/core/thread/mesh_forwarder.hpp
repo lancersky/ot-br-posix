@@ -306,7 +306,7 @@ public:
      * Resets the IP level counters.
      *
      */
-    void ResetCounters(void) { memset(&mIpCounters, 0, sizeof(mIpCounters)); }
+    void ResetCounters(void) { ClearAllBytes(mIpCounters); }
 
 #if OPENTHREAD_CONFIG_TX_QUEUE_STATISTICS_ENABLE
     /**
@@ -550,9 +550,9 @@ private:
                                  uint16_t                aFragmentLength,
                                  uint16_t                aSrcRloc16,
                                  Message::Priority       aPriority);
-    Error HandleDatagram(Message &aMessage, const ThreadLinkInfo &aLinkInfo, const Mac::Address &aMacSource);
+    Error HandleDatagram(Message &aMessage, const Mac::Address &aMacSource);
     void  ClearReassemblyList(void);
-    void  RemoveMessage(Message &aMessage);
+    void  EvictMessage(Message &aMessage);
     void  HandleDiscoverComplete(void);
 
     void          HandleReceivedFrame(Mac::RxFrame &aFrame);
@@ -564,6 +564,7 @@ private:
     void UpdateNeighborLinkFailures(Neighbor &aNeighbor, Error aError, bool aAllowNeighborRemove, uint8_t aFailLimit);
     void HandleSentFrame(Mac::TxFrame &aFrame, Error aError);
     void UpdateSendMessage(Error aFrameTxError, Mac::Address &aMacDest, Neighbor *aNeighbor);
+    void FinalizeMessageDirectTx(Message &aMessage, Error aError);
     bool RemoveMessageIfNoPendingTx(Message &aMessage);
 
     void HandleTimeTick(void);

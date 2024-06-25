@@ -38,6 +38,7 @@
 #include <openthread/border_routing.h>
 #include <openthread/dataset.h>
 #include <openthread/dnssd_server.h>
+#include <openthread/link_metrics.h>
 #include <openthread/logging.h>
 #include <openthread/nat64.h>
 #include <openthread/srp_server.h>
@@ -60,10 +61,10 @@
 namespace otbr {
 namespace Ncp {
 
-static const uint16_t kThreadVersion11  = 2; ///< Thread Version 1.1
-static const uint16_t kThreadVersion12  = 3; ///< Thread Version 1.2
-static const uint16_t kThreadVersion13  = 4; ///< Thread Version 1.3
-static const uint16_t kThreadVersion131 = 5; ///< Thread Version 1.3.1
+static const uint16_t kThreadVersion11 = 2; ///< Thread Version 1.1
+static const uint16_t kThreadVersion12 = 3; ///< Thread Version 1.2
+static const uint16_t kThreadVersion13 = 4; ///< Thread Version 1.3
+static const uint16_t kThreadVersion14 = 5; ///< Thread Version 1.4
 
 ControllerOpenThread::ControllerOpenThread(const char                      *aInterfaceName,
                                            const std::vector<const char *> &aRadioUrls,
@@ -285,6 +286,9 @@ otError ControllerOpenThread::ApplyFeatureFlagList(const FeatureFlagList &aFeatu
 #if OTBR_ENABLE_DHCP6_PD
     otBorderRoutingDhcp6PdSetEnabled(mInstance, aFeatureFlagList.enable_dhcp6_pd());
 #endif
+#if OTBR_ENABLE_LINK_METRICS_TELEMETRY
+    otLinkMetricsManagerSetEnabled(mInstance, aFeatureFlagList.enable_link_metrics_manager());
+#endif
 
     return error;
 }
@@ -296,6 +300,9 @@ void ControllerOpenThread::Deinit(void)
 
     otSysDeinit();
     mInstance = nullptr;
+
+    mThreadStateChangedCallbacks.clear();
+    mResetHandlers.clear();
 }
 
 void ControllerOpenThread::HandleStateChanged(otChangedFlags aFlags)
@@ -385,8 +392,8 @@ const char *ControllerOpenThread::GetThreadVersion(void)
     case kThreadVersion13:
         version = "1.3.0";
         break;
-    case kThreadVersion131:
-        version = "1.3.1";
+    case kThreadVersion14:
+        version = "1.4";
         break;
     default:
         otbrLogEmerg("Unexpected thread version %hu", otThreadGetVersion());

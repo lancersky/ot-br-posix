@@ -526,7 +526,7 @@ otError Dataset::ProcessCommand(const ComponentMapper &aMapper, Arg aArgs[])
     }
     else
     {
-        memset(&dataset, 0, sizeof(dataset));
+        ClearAllBytes(dataset);
         SuccessOrExit(error = (this->*aMapper.mParse)(aArgs, dataset));
         dataset.mComponents.*aMapper.mIsPresentPtr = true;
         SuccessOrExit(error = otDatasetUpdateTlvs(&dataset, &sDatasetTlvs));
@@ -612,7 +612,7 @@ template <> otError Dataset::Process<Cmd("init")>(Arg aArgs[])
         otOperationalDataset dataset;
 
         SuccessOrExit(error = otDatasetCreateNewNetwork(GetInstancePtr(), &dataset));
-        SuccessOrExit(error = otDatasetConvertToTlvs(&dataset, &sDatasetTlvs));
+        otDatasetConvertToTlvs(&dataset, &sDatasetTlvs);
     }
 #endif
     else if (aArgs[0] == "tlvs")
@@ -716,7 +716,7 @@ template <> otError Dataset::Process<Cmd("clear")>(Arg aArgs[])
 {
     OT_UNUSED_VARIABLE(aArgs);
 
-    memset(&sDatasetTlvs, 0, sizeof(sDatasetTlvs));
+    ClearAllBytes(sDatasetTlvs);
     return OT_ERROR_NONE;
 }
 
@@ -765,7 +765,7 @@ template <> otError Dataset::Process<Cmd("mgmtsetcommand")>(Arg aArgs[])
     uint8_t              tlvs[128];
     uint8_t              tlvsLength = 0;
 
-    memset(&dataset, 0, sizeof(dataset));
+    ClearAllBytes(dataset);
 
     for (Arg *arg = &aArgs[1]; !arg->IsEmpty();)
     {
@@ -853,7 +853,7 @@ template <> otError Dataset::Process<Cmd("mgmtgetcommand")>(Arg aArgs[])
     bool                           destAddrSpecified = false;
     otIp6Address                   address;
 
-    memset(&datasetComponents, 0, sizeof(datasetComponents));
+    ClearAllBytes(datasetComponents);
 
     for (Arg *arg = &aArgs[1]; !arg->IsEmpty(); arg++)
     {
@@ -1003,7 +1003,7 @@ otError Dataset::ParseSecurityPolicy(otSecurityPolicy &aSecurityPolicy, Arg *&aA
     otSecurityPolicy policy;
     uint8_t          versionThreshold;
 
-    memset(&policy, 0, sizeof(policy));
+    ClearAllBytes(policy);
 
     SuccessOrExit(error = aArgs->ParseAsUint16(policy.mRotationTime));
     aArgs++;
@@ -1105,7 +1105,7 @@ template <> otError Dataset::Process<Cmd("set")>(Arg aArgs[])
     {
         otOperationalDataset     dataset;
         otOperationalDatasetTlvs datasetTlvs;
-        uint16_t                 tlvsLength = MeshCoP::Dataset::kMaxSize;
+        uint16_t                 tlvsLength = OT_OPERATIONAL_DATASET_MAX_LENGTH;
 
         SuccessOrExit(error = aArgs[1].ParseAsHexString(tlvsLength, datasetTlvs.mTlvs));
         datasetTlvs.mLength = static_cast<uint8_t>(tlvsLength);
@@ -1154,10 +1154,46 @@ template <> otError Dataset::Process<Cmd("updater")>(Arg aArgs[])
 {
     otError error = OT_ERROR_NONE;
 
+    /**
+     * @cli dataset updater
+     * @code
+     * dataset updater
+     * Enabled
+     * Done
+     * @endcode
+     * @par api_copy
+     * #otDatasetUpdaterIsUpdateOngoing
+     */
     if (aArgs[0].IsEmpty())
     {
         OutputEnabledDisabledStatus(otDatasetUpdaterIsUpdateOngoing(GetInstancePtr()));
     }
+    /**
+     * @cli dataset updater start
+     * @code
+     * channel
+     * 19
+     * Done
+     * dataset clear
+     * Done
+     * dataset channel 15
+     * Done
+     * dataset
+     * Channel: 15
+     * Done
+     * dataset updater start
+     * Done
+     * dataset updater
+     * Enabled
+     * Done
+     * Dataset update complete: OK
+     * channel
+     * 15
+     * Done
+     * @endcode
+     * @par api_copy
+     * #otDatasetUpdaterRequestUpdate
+     */
     else if (aArgs[0] == "start")
     {
         otOperationalDataset dataset;
@@ -1166,6 +1202,15 @@ template <> otError Dataset::Process<Cmd("updater")>(Arg aArgs[])
         SuccessOrExit(
             error = otDatasetUpdaterRequestUpdate(GetInstancePtr(), &dataset, &Dataset::HandleDatasetUpdater, this));
     }
+    /**
+     * @cli dataset updater cancel
+     * @code
+     * @dataset updater cancel
+     * Done
+     * @endcode
+     * @par api_copy
+     * #otDatasetUpdaterCancelUpdate
+     */
     else if (aArgs[0] == "cancel")
     {
         otDatasetUpdaterCancelUpdate(GetInstancePtr());

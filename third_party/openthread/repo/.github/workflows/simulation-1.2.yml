@@ -66,11 +66,11 @@ jobs:
         arch: ["m32", "m64"]
     steps:
     - name: Harden Runner
-      uses: step-security/harden-runner@1b05615854632b887b69ae1be8cbefe72d3ae423 # v2.6.0
+      uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
       with:
         egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
-    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+    - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
       with:
         submodules: true
     - name: Bootstrap
@@ -95,12 +95,12 @@ jobs:
           CRASHED=$(./script/test check_crash | tail -1)
           [[ $CRASHED -eq "1" ]] && echo "Crashed!" || echo "Not crashed."
           echo "CRASHED=$CRASHED" >> $GITHUB_ENV
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       if: ${{ failure() }}
       with:
         name: thread-1-3-${{ matrix.compiler.c }}-${{ matrix.arch }}-pcaps
         path: "*.pcap"
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       if: ${{ failure() && env.CRASHED == '1' }}
       with:
         name: core-packet-verification-thread-1-3
@@ -109,10 +109,11 @@ jobs:
     - name: Generate Coverage
       run: |
         ./script/test generate_coverage "${{ matrix.compiler.gcov }}"
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       with:
         name: cov-thread-1-3-${{ matrix.compiler.c }}-${{ matrix.arch }}
         path: tmp/coverage.info
+        retention-days: 1
 
   packet-verification-low-power:
     runs-on: ubuntu-20.04
@@ -127,11 +128,11 @@ jobs:
       INTER_OP_BBR: 0
     steps:
     - name: Harden Runner
-      uses: step-security/harden-runner@1b05615854632b887b69ae1be8cbefe72d3ae423 # v2.6.0
+      uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
       with:
         egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
-    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+    - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
       with:
         submodules: true
     - name: Bootstrap
@@ -142,6 +143,9 @@ jobs:
     - name: Build
       run: |
         ./script/test build
+    - name: Build with OT_CSL_RECEIVER_LOCAL_TIME_SYNC
+      run: |
+        OT_BUILDDIR="${PWD}/build_csl_receiver_local_time_sync" OT_OPTIONS="-DOT_CSL_RECEIVER_LOCAL_TIME_SYNC=ON" ./script/test build
     - name: Get Thread-Wireshark
       run: |
         ./script/test get_thread_wireshark
@@ -153,20 +157,23 @@ jobs:
         do
           ./script/test cert_suite ./tests/scripts/thread-cert/v1_2_LowPower*.py
         done
+    - name: Run with OT_CSL_RECEIVER_LOCAL_TIME_SYNC
+      run: |
+        OT_BUILDDIR="${PWD}/build_csl_receiver_local_time_sync" ./script/test cert_suite ./tests/scripts/thread-cert/v1_2_LowPower*.py
     - name: Check Crash
       if: ${{ failure() }}
       run: |
           CRASHED=$(./script/test check_crash | tail -1)
           [[ $CRASHED -eq "1" ]] && echo "Crashed!" || echo "Not crashed."
           echo "CRASHED=$CRASHED" >> $GITHUB_ENV
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       if: ${{ failure() }}
       with:
         name: packet-verification-low-power-pcaps
         path: |
           *.pcap
           *.json
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       if: ${{ failure() && env.CRASHED == '1' }}
       with:
         name: core-packet-verification-low-power
@@ -175,10 +182,11 @@ jobs:
     - name: Generate Coverage
       run: |
         ./script/test generate_coverage gcc
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       with:
         name: cov-packet-verification-low-power
         path: tmp/coverage.info
+        retention-days: 1
 
   packet-verification-1-1-on-1-3:
     runs-on: ubuntu-20.04
@@ -191,11 +199,11 @@ jobs:
       MULTIPLY: 3
     steps:
     - name: Harden Runner
-      uses: step-security/harden-runner@1b05615854632b887b69ae1be8cbefe72d3ae423 # v2.6.0
+      uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
       with:
         egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
-    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+    - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
       with:
         submodules: true
     - name: Bootstrap
@@ -212,7 +220,7 @@ jobs:
     - name: Run
       run: |
         ./script/test cert_suite ./tests/scripts/thread-cert/Cert_*.py ./tests/scripts/thread-cert/test_*.py
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       if: ${{ failure() }}
       with:
         name: packet-verification-1.1-on-1.3-pcaps
@@ -222,10 +230,61 @@ jobs:
     - name: Generate Coverage
       run: |
         ./script/test generate_coverage gcc
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       with:
         name: cov-packet-verification-1-1-on-1-3
         path: tmp/coverage.info
+        retention-days: 1
+
+  channel-manager-csl:
+    runs-on: ubuntu-20.04
+    env:
+      CFLAGS: -m32
+      CXXFLAGS: -m32
+      LDFLAGS: -m32
+      COVERAGE: 1
+      THREAD_VERSION: 1.3
+      VIRTUAL_TIME: 1
+      INTER_OP: 1
+      INTER_OP_BBR: 1
+      ADDON_FEAT_1_2: 1
+    steps:
+    - name: Harden Runner
+      uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
+      with:
+        egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+    - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
+      with:
+        submodules: true
+    - name: Bootstrap
+      run: |
+        sudo rm /etc/apt/sources.list.d/* && sudo apt-get update
+        sudo apt-get --no-install-recommends install -y g++-multilib lcov ninja-build python3-setuptools python3-wheel
+        python3 -m pip install -r tests/scripts/thread-cert/requirements.txt
+    - name: Build
+      run: |
+        OT_OPTIONS="-DOT_CHANNEL_MANAGER_CSL=ON" ./script/test build
+    - name: Run
+      run: |
+        ulimit -c unlimited
+        ./script/test cert_suite ./tests/scripts/thread-cert/Cert_*.py
+        ./script/test cert_suite ./tests/scripts/thread-cert/test_*.py
+        ./script/test cert_suite ./tests/scripts/thread-cert/v1_2_*.py
+        ./script/test cert_suite ./tests/scripts/thread-cert/addon_test_channel_manager_autocsl*.py
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+      if: ${{ failure() }}
+      with:
+        name: channel-manager-csl
+        path: ot_testing
+    - name: Generate Coverage
+      run: |
+        ./script/test generate_coverage gcc
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+      with:
+        name: cov-channel-manager-csl
+        path: tmp/coverage.info
+        retention-days: 1
 
   expects:
     runs-on: ubuntu-20.04
@@ -235,16 +294,17 @@ jobs:
       VIRTUAL_TIME: 0
     steps:
     - name: Harden Runner
-      uses: step-security/harden-runner@1b05615854632b887b69ae1be8cbefe72d3ae423 # v2.6.0
+      uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
       with:
         egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
-    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+    - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
       with:
         submodules: true
     - name: Bootstrap
       run: |
         sudo apt-get --no-install-recommends install -y expect ninja-build lcov socat
+        pip install bleak
     - name: Run RCP Mode
       run: |
         ulimit -c unlimited
@@ -256,7 +316,7 @@ jobs:
           CRASHED=$(./script/test check_crash | tail -1)
           [[ $CRASHED -eq "1" ]] && echo "Crashed!" || echo "Not crashed."
           echo "CRASHED=$CRASHED" >> $GITHUB_ENV
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       if: ${{ failure() && env.CRASHED == '1' }}
       with:
         name: core-expect-1-3
@@ -265,10 +325,11 @@ jobs:
     - name: Generate Coverage
       run: |
         ./script/test generate_coverage gcc
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       with:
         name: cov-expects
         path: tmp/coverage.info
+        retention-days: 1
 
   thread-1-3-posix:
     runs-on: ubuntu-20.04
@@ -283,11 +344,11 @@ jobs:
       INTER_OP: 1
     steps:
     - name: Harden Runner
-      uses: step-security/harden-runner@1b05615854632b887b69ae1be8cbefe72d3ae423 # v2.6.0
+      uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
       with:
         egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
-    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+    - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
       with:
         submodules: true
     - name: Bootstrap
@@ -314,12 +375,12 @@ jobs:
           CRASHED=$(./script/test check_crash | tail -1)
           [[ $CRASHED -eq "1" ]] && echo "Crashed!" || echo "Not crashed."
           echo "CRASHED=$CRASHED" >> $GITHUB_ENV
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       if: ${{ failure() }}
       with:
         name: thread-1-3-posix-pcaps
         path: "*.pcap"
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       if: ${{ failure() && env.CRASHED == '1' }}
       with:
         name: core-thread-1-3-posix
@@ -328,10 +389,11 @@ jobs:
     - name: Generate Coverage
       run: |
         ./script/test generate_coverage gcc
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       with:
         name: cov-thread-1-3-posix
         path: tmp/coverage.info
+        retention-days: 1
 
   upload-coverage:
     needs:
@@ -343,38 +405,28 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
     - name: Harden Runner
-      uses: step-security/harden-runner@1b05615854632b887b69ae1be8cbefe72d3ae423 # v2.6.0
+      uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
       with:
         egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
-    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+    - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
       with:
         submodules: true
     - name: Bootstrap
       run: |
         sudo apt-get --no-install-recommends install -y lcov
-    - uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a # v3.0.2
+    - uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
       with:
         path: coverage/
+        pattern: cov-*
+        merge-multiple: true
     - name: Combine Coverage
       run: |
         script/test combine_coverage
     - name: Upload Coverage
-      uses: codecov/codecov-action@eaaf4bedf32dbdc6b720b63067d99c4d77d6047d # v3.1.4
+      uses: codecov/codecov-action@5ecb98a3c6b747ed38dc09f787459979aebb39be # v4.3.1
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       with:
         files: final.info
         fail_ci_if_error: true
-
-  delete-coverage-artifacts:
-    needs: upload-coverage
-    runs-on: ubuntu-20.04
-    steps:
-    - name: Harden Runner
-      uses: step-security/harden-runner@1b05615854632b887b69ae1be8cbefe72d3ae423 # v2.6.0
-      with:
-        egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
-
-    - uses: geekyeggo/delete-artifact@54ab544f12cdb7b71613a16a2b5a37a9ade990af # v2.0.0
-      with:
-        name: cov-*
-        useGlob: true

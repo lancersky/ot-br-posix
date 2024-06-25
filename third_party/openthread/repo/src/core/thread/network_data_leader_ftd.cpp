@@ -58,25 +58,6 @@ namespace NetworkData {
 
 RegisterLogModule("NetworkData");
 
-Leader::Leader(Instance &aInstance)
-    : LeaderBase(aInstance)
-#if OPENTHREAD_CONFIG_BORDER_ROUTER_SIGNAL_NETWORK_DATA_FULL
-    , mIsClone(false)
-#endif
-    , mWaitingForNetDataSync(false)
-    , mContextIds(aInstance)
-    , mTimer(aInstance)
-{
-    Reset();
-}
-
-void Leader::Reset(void)
-{
-    LeaderBase::Reset();
-
-    mContextIds.Clear();
-}
-
 void Leader::Start(Mle::LeaderStartMode aStartMode)
 {
 #if OPENTHREAD_CONFIG_BORDER_ROUTER_SIGNAL_NETWORK_DATA_FULL
@@ -699,10 +680,7 @@ exit:
     if (!mIsClone)
 #endif
     {
-        if (error != kErrorNone)
-        {
-            LogNote("Failed to register network data: %s", ErrorToString(error));
-        }
+        LogWarnOnError(error, "register network data");
     }
 }
 
@@ -1237,10 +1215,10 @@ void Leader::HandleNetworkDataRestoredAfterReset(void)
 {
     const PrefixTlv *prefix;
     TlvIterator      tlvIterator(GetTlvsStart(), GetTlvsEnd());
-    Iterator         iterator = kIteratorInit;
     ChangedFlags     flags;
     uint16_t         rloc16;
     uint16_t         sessionId;
+    Rlocs            rlocs;
 
     mWaitingForNetDataSync = false;
 
@@ -1251,16 +1229,13 @@ void Leader::HandleNetworkDataRestoredAfterReset(void)
     // got the chance to send the updated Network Data to other
     // routers.
 
-    while (GetNextServer(iterator, rloc16) == kErrorNone)
-    {
-        if (!Get<RouterTable>().IsAllocated(Mle::RouterIdFromRloc16(rloc16)))
-        {
-            // After we `RemoveRloc()` the Network Data gets changed
-            // and the `iterator` will not be valid anymore. So we set
-            // it to `kIteratorInit` to restart the loop.
+    FindRlocs(kAnyBrOrServer, kAnyRole, rlocs);
 
-            RemoveRloc(rloc16, kMatchModeRouterId, flags);
-            iterator = kIteratorInit;
+    for (uint16_t rloc : rlocs)
+    {
+        if (!Get<RouterTable>().IsAllocated(Mle::RouterIdFromRloc16(rloc)))
+        {
+            RemoveRloc(rloc, kMatchModeRouterId, flags);
         }
     }
 

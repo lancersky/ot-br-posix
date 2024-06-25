@@ -116,10 +116,8 @@ public:
          * Clears and initializes the unicast address as a preferred, valid, thread-origin address with
          * 64-bit prefix length.
          *
-         * @param[in]   aPreferred  Whether to initialize as a preferred address.
-         *
          */
-        void InitAsThreadOrigin(bool aPreferred = false);
+        void InitAsThreadOrigin(void);
 
         /**
          * Clears and initializes the unicast address as a valid (but not preferred), thread-origin,
@@ -398,6 +396,14 @@ public:
     const LinkedList<UnicastAddress> &GetUnicastAddresses(void) const { return mUnicastAddresses; }
 
     /**
+     * Returns the linked list of unicast addresses.
+     *
+     * @returns The linked list of unicast addresses.
+     *
+     */
+    LinkedList<UnicastAddress> &GetUnicastAddresses(void) { return mUnicastAddresses; }
+
+    /**
      * Adds a unicast address to the network interface.
      *
      * Is intended for addresses internal to OpenThread. The @p aAddress instance is directly added in the
@@ -421,7 +427,19 @@ public:
      * @param[in]  aAddress  A reference to the unicast address.
      *
      */
-    void RemoveUnicastAddress(const UnicastAddress &aAddress);
+    void RemoveUnicastAddress(UnicastAddress &aAddress);
+
+    /**
+     * Updates the preferred flag on a previously added (internal to OpenThread core) unicast address.
+     *
+     * If the address is not added to the network interface or the current preferred flag of @p aAddress is the same as
+     * the given @p aPreferred, no action is performed.
+     *
+     * @param[in] aAddress        The unicast address
+     * @param[in] aPreferred The new value for preferred flag.
+     *
+     */
+    void UpdatePreferredFlagOn(UnicastAddress &aAddress, bool aPreferred);
 
     /**
      * Indicates whether or not an address is assigned to the interface.

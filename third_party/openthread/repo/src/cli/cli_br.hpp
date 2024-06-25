@@ -36,8 +36,10 @@
 
 #include "openthread-core-config.h"
 
+#include <openthread/border_routing.h>
+
 #include "cli/cli_config.h"
-#include "cli/cli_output.hpp"
+#include "cli/cli_utils.hpp"
 
 #if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
 
@@ -48,11 +50,9 @@ namespace Cli {
  * Implements the Border Router CLI interpreter.
  *
  */
-class Br : private Output
+class Br : private Utils
 {
 public:
-    typedef Utils::CmdLineParser::Arg Arg;
-
     /**
      * Constructor
      *
@@ -61,7 +61,7 @@ public:
      *
      */
     Br(otInstance *aInstance, OutputImplementer &aOutputImplementer)
-        : Output(aInstance, aOutputImplementer)
+        : Utils(aInstance, aOutputImplementer)
     {
     }
 
@@ -92,6 +92,7 @@ private:
     template <CommandId kCommandId> otError Process(Arg aArgs[]);
 
     otError ParsePrefixTypeArgs(Arg aArgs[], PrefixType &aFlags);
+    void    OutputRouterInfo(const otBorderRoutingRouterEntry &aEntry);
 };
 
 } // namespace Cli

@@ -35,6 +35,8 @@
 
 #include "mdns/mdns.hpp"
 
+#if OTBR_ENABLE_MDNS
+
 #include <assert.h>
 
 #include <algorithm>
@@ -76,6 +78,19 @@ void Publisher::PublishHost(const std::string &aName, const AddressList &aAddres
     if (error != OTBR_ERROR_NONE)
     {
         UpdateMdnsResponseCounters(mTelemetryInfo.mHostRegistrations, error);
+    }
+}
+
+void Publisher::PublishKey(const std::string &aName, const KeyData &aKeyData, ResultCallback &&aCallback)
+{
+    otbrError error;
+
+    mKeyRegistrationBeginTime[aName] = Clock::now();
+
+    error = PublishKeyImpl(aName, aKeyData, std::move(aCallback));
+    if (error != OTBR_ERROR_NONE)
+    {
+        UpdateMdnsResponseCounters(mTelemetryInfo.mKeyRegistrations, error);
     }
 }
 
@@ -196,6 +211,21 @@ void Publisher::OnServiceResolved(std::string aType, DiscoveredInstanceInfo aIns
     otbrLogInfo("Service %s is resolved successfully: %s %s host %s addresses %zu", aType.c_str(),
                 aInstanceInfo.mRemoved ? "remove" : "add", aInstanceInfo.mName.c_str(), aInstanceInfo.mHostName.c_str(),
                 aInstanceInfo.mAddresses.size());
+
+    if (!aInstanceInfo.mRemoved)
+    {
+        std::string addressesString;
+
+        for (const auto &address : aInstanceInfo.mAddresses)
+        {
+            addressesString += address.ToString() + ",";
+        }
+        if (addressesString.size())
+        {
+            addressesString.pop_back();
+        }
+        otbrLogInfo("addresses: [ %s ]", addressesString.c_str());
+    }
 
     DnsUtils::CheckServiceNameSanity(aType);
 
@@ -318,7 +348,7 @@ std::string Publisher::MakeFullServiceName(const std::string &aName, const std::
     return aName + "." + aType + ".local";
 }
 
-std::string Publisher::MakeFullHostName(const std::string &aName)
+std::string Publisher::MakeFullName(const std::string &aName)
 {
     return aName + ".local";
 }
@@ -350,6 +380,13 @@ exit:
 Publisher::ServiceRegistration *Publisher::FindServiceRegistration(const std::string &aName, const std::string &aType)
 {
     auto it = mServiceRegistrations.find(MakeFullServiceName(aName, aType));
+
+    return it != mServiceRegistrations.end() ? it->second.get() : nullptr;
+}
+
+Publisher::ServiceRegistration *Publisher::FindServiceRegistration(const std::string &aNameAndType)
+{
+    auto it = mServiceRegistrations.find(MakeFullName(aNameAndType));
 
     return it != mServiceRegistrations.end() ? it->second.get() : nullptr;
 }
@@ -464,6 +501,82 @@ Publisher::HostRegistration *Publisher::FindHostRegistration(const std::string &
     return it != mHostRegistrations.end() ? it->second.get() : nullptr;
 }
 
+Publisher::ResultCallback Publisher::HandleDuplicateKeyRegistration(const std::string &aName,
+                                                                    const KeyData     &aKeyData,
+                                                                    ResultCallback   &&aCallback)
+{
+    KeyRegistration *keyReg = FindKeyRegistration(aName);
+
+    VerifyOrExit(keyReg != nullptr);
+
+    if (keyReg->IsOutdated(aName, aKeyData))
+    {
+        otbrLogInfo("Removing existing key %s: outdated", aName.c_str());
+        RemoveKeyRegistration(keyReg->mName, OTBR_ERROR_ABORTED);
+    }
+    else if (keyReg->IsCompleted())
+    {
+        // Returns success if the same key has already been
+        // registered with exactly the same parameters.
+        std::move(aCallback)(OTBR_ERROR_NONE);
+    }
+    else
+    {
+        // If the same key is being registered with the same parameters,
+        // let's join the waiting queue for the result.
+        keyReg->mCallback = std::bind(
+            [](std::shared_ptr<ResultCallback> aExistingCallback, std::shared_ptr<ResultCallback> aNewCallback,
+               otbrError aError) {
+                std::move (*aExistingCallback)(aError);
+                std::move (*aNewCallback)(aError);
+            },
+            std::make_shared<ResultCallback>(std::move(keyReg->mCallback)),
+            std::make_shared<ResultCallback>(std::move(aCallback)), std::placeholders::_1);
+    }
+
+exit:
+    return std::move(aCallback);
+}
+
+void Publisher::AddKeyRegistration(KeyRegistrationPtr &&aKeyReg)
+{
+    mKeyRegistrations.emplace(MakeFullKeyName(aKeyReg->mName), std::move(aKeyReg));
+}
+
+void Publisher::RemoveKeyRegistration(const std::string &aName, otbrError aError)
+{
+    auto               it = mKeyRegistrations.find(MakeFullKeyName(aName));
+    KeyRegistrationPtr keyReg;
+
+    otbrLogInfo("Removing key %s", aName.c_str());
+    VerifyOrExit(it != mKeyRegistrations.end());
+
+    // Keep the KeyRegistration around before calling `Complete`
+    // to invoke the callback. This is for avoiding invalid access
+    // to the KeyRegistration when it's freed from the callback.
+    keyReg = std::move(it->second);
+    mKeyRegistrations.erase(it);
+    keyReg->Complete(aError);
+    otbrLogInfo("Removed key %s", aName.c_str());
+
+exit:
+    return;
+}
+
+Publisher::KeyRegistration *Publisher::FindKeyRegistration(const std::string &aName)
+{
+    auto it = mKeyRegistrations.find(MakeFullKeyName(aName));
+
+    return it != mKeyRegistrations.end() ? it->second.get() : nullptr;
+}
+
+Publisher::KeyRegistration *Publisher::FindKeyRegistration(const std::string &aName, const std::string &aType)
+{
+    auto it = mKeyRegistrations.find(MakeFullServiceName(aName, aType));
+
+    return it != mKeyRegistrations.end() ? it->second.get() : nullptr;
+}
+
 Publisher::Registration::~Registration(void)
 {
     TriggerCompleteCallback(OTBR_ERROR_ABORTED);
@@ -512,6 +625,26 @@ void Publisher::HostRegistration::OnComplete(otbrError aError)
     {
         mPublisher->UpdateMdnsResponseCounters(mPublisher->mTelemetryInfo.mHostRegistrations, aError);
         mPublisher->UpdateHostRegistrationEmaLatency(mName, aError);
+    }
+}
+
+bool Publisher::KeyRegistration::IsOutdated(const std::string &aName, const KeyData &aKeyData) const
+{
+    return !(mName == aName && mKeyData == aKeyData);
+}
+
+void Publisher::KeyRegistration::Complete(otbrError aError)
+{
+    OnComplete(aError);
+    Registration::TriggerCompleteCallback(aError);
+}
+
+void Publisher::KeyRegistration::OnComplete(otbrError aError)
+{
+    if (!IsCompleted())
+    {
+        mPublisher->UpdateMdnsResponseCounters(mPublisher->mTelemetryInfo.mKeyRegistrations, aError);
+        mPublisher->UpdateKeyRegistrationEmaLatency(mName, aError);
     }
 }
 
@@ -593,6 +726,18 @@ void Publisher::UpdateHostRegistrationEmaLatency(const std::string &aHostName, o
     }
 }
 
+void Publisher::UpdateKeyRegistrationEmaLatency(const std::string &aKeyName, otbrError aError)
+{
+    auto it = mKeyRegistrationBeginTime.find(aKeyName);
+
+    if (it != mKeyRegistrationBeginTime.end())
+    {
+        uint32_t latency = std::chrono::duration_cast<Milliseconds>(Clock::now() - it->second).count();
+        UpdateEmaLatency(mTelemetryInfo.mKeyRegistrationEmaLatency, latency, aError);
+        mKeyRegistrationBeginTime.erase(it);
+    }
+}
+
 void Publisher::UpdateServiceInstanceResolutionEmaLatency(const std::string &aInstanceName,
                                                           const std::string &aType,
                                                           otbrError          aError)
@@ -619,5 +764,22 @@ void Publisher::UpdateHostResolutionEmaLatency(const std::string &aHostName, otb
     }
 }
 
+void Publisher::AddAddress(AddressList &aAddressList, const Ip6Address &aAddress)
+{
+    aAddressList.push_back(aAddress);
+}
+
+void Publisher::RemoveAddress(AddressList &aAddressList, const Ip6Address &aAddress)
+{
+    auto it = std::find(aAddressList.begin(), aAddressList.end(), aAddress);
+
+    if (it != aAddressList.end())
+    {
+        aAddressList.erase(it);
+    }
+}
+
 } // namespace Mdns
 } // namespace otbr
+
+#endif // OTBR_ENABLE_MDNS

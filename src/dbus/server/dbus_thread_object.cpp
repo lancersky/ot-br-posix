@@ -42,6 +42,7 @@
 #include <openthread/openthread-system.h>
 #include <openthread/srp_server.h>
 #include <openthread/thread_ftd.h>
+#include <openthread/trel.h>
 #include <openthread/platform/radio.h>
 
 #include "common/api_strings.hpp"
@@ -240,6 +241,8 @@ otbrError DBusThreadObject::Init(void)
                                std::bind(&DBusThreadObject::GetMdnsTelemetryInfoHandler, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_DNSSD_COUNTERS,
                                std::bind(&DBusThreadObject::GetDnssdCountersHandler, this, _1));
+    RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_OTBR_VERSION,
+                               std::bind(&DBusThreadObject::GetOtbrVersionHandler, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_OT_HOST_VERSION,
                                std::bind(&DBusThreadObject::GetOtHostVersionHandler, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_OT_RCP_VERSION,
@@ -268,6 +271,8 @@ otbrError DBusThreadObject::Init(void)
                                std::bind(&DBusThreadObject::GetNat64Cidr, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_INFRA_LINK_INFO,
                                std::bind(&DBusThreadObject::GetInfraLinkInfo, this, _1));
+    RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_TREL_INFO,
+                               std::bind(&DBusThreadObject::GetTrelInfoHandler, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_DNS_UPSTREAM_QUERY_STATE,
                                std::bind(&DBusThreadObject::GetDnsUpstreamQueryState, this, _1));
     RegisterGetPropertyHandler(OTBR_DBUS_THREAD_INTERFACE, OTBR_DBUS_PROPERTY_TELEMETRY_DATA,
@@ -1405,6 +1410,33 @@ exit:
 #endif // OTBR_ENABLE_DNSSD_DISCOVERY_PROXY
 }
 
+otError DBusThreadObject::GetTrelInfoHandler(DBusMessageIter &aIter)
+{
+#if OTBR_ENABLE_TREL
+    auto           instance = mNcp->GetThreadHelper()->GetInstance();
+    otError        error    = OT_ERROR_NONE;
+    TrelInfo       trelInfo;
+    otTrelCounters otTrelCounters = *otTrelGetCounters(instance);
+
+    trelInfo.mTrelCounters.mTxPackets = otTrelCounters.mTxPackets;
+    trelInfo.mTrelCounters.mTxBytes   = otTrelCounters.mTxBytes;
+    trelInfo.mTrelCounters.mTxFailure = otTrelCounters.mTxFailure;
+    trelInfo.mTrelCounters.mRxPackets = otTrelCounters.mRxPackets;
+    trelInfo.mTrelCounters.mRxBytes   = otTrelCounters.mRxBytes;
+
+    trelInfo.mNumTrelPeers = otTrelGetNumberOfPeers(instance);
+    trelInfo.mEnabled      = otTrelIsEnabled(instance);
+
+    SuccessOrExit(DBusMessageEncodeToVariant(&aIter, trelInfo), error = OT_ERROR_INVALID_ARGS);
+exit:
+    return error;
+#else  // OTBR_ENABLE_TREL
+    OTBR_UNUSED_VARIABLE(aIter);
+
+    return OT_ERROR_NOT_IMPLEMENTED;
+#endif // OTBR_ENABLE_TREL
+}
+
 otError DBusThreadObject::GetTelemetryDataHandler(DBusMessageIter &aIter)
 {
 #if OTBR_ENABLE_TELEMETRY_DATA_API
@@ -1412,7 +1444,10 @@ otError DBusThreadObject::GetTelemetryDataHandler(DBusMessageIter &aIter)
     threadnetwork::TelemetryData telemetryData;
     auto                         threadHelper = mNcp->GetThreadHelper();
 
-    VerifyOrExit(threadHelper->RetrieveTelemetryData(mPublisher, telemetryData) == OT_ERROR_NONE);
+    if (threadHelper->RetrieveTelemetryData(mPublisher, telemetryData) != OT_ERROR_NONE)
+    {
+        otbrLogWarning("Some metrics were not populated in RetrieveTelemetryData");
+    }
 
     {
         const std::string    telemetryDataBytes = telemetryData.SerializeAsString();
@@ -1435,6 +1470,7 @@ otError DBusThreadObject::GetCapabilitiesHandler(DBusMessageIter &aIter)
     otbr::Capabilities capabilities;
 
     capabilities.set_nat64(OTBR_ENABLE_NAT64);
+    capabilities.set_dhcp6_pd(OTBR_ENABLE_DHCP6_PD);
 
     {
         const std::string    dataBytes = capabilities.SerializeAsString();
@@ -1494,6 +1530,17 @@ void DBusThreadObject::RegisterGetPropertyHandler(const std::string         &aIn
 {
     DBusObject::RegisterGetPropertyHandler(aInterfaceName, aPropertyName, aHandler);
     mGetPropertyHandlers[aPropertyName] = aHandler;
+}
+
+otError DBusThreadObject::GetOtbrVersionHandler(DBusMessageIter &aIter)
+{
+    otError     error   = OT_ERROR_NONE;
+    std::string version = OTBR_PACKAGE_VERSION;
+
+    SuccessOrExit(DBusMessageEncodeToVariant(&aIter, version), error = OT_ERROR_FAILED);
+
+exit:
+    return error;
 }
 
 otError DBusThreadObject::GetOtHostVersionHandler(DBusMessageIter &aIter)
@@ -1831,7 +1878,7 @@ otError DBusThreadObject::GetNat64Cidr(DBusMessageIter &aIter)
     otIp4Cidr cidr;
     char      cidrString[OT_IP4_CIDR_STRING_SIZE];
 
-    otNat64GetCidr(mNcp->GetThreadHelper()->GetInstance(), &cidr);
+    SuccessOrExit(error = otNat64GetCidr(mNcp->GetThreadHelper()->GetInstance(), &cidr));
     otIp4CidrToString(&cidr, cidrString, sizeof(cidrString));
 
     VerifyOrExit(DBusMessageEncodeToVariant(&aIter, std::string(cidrString)) == OTBR_ERROR_NONE,
@@ -1848,7 +1895,7 @@ otError DBusThreadObject::SetNat64Cidr(DBusMessageIter &aIter)
     otIp4Cidr   cidr;
 
     VerifyOrExit(DBusMessageExtractFromVariant(&aIter, cidrString) == OTBR_ERROR_NONE, error = OT_ERROR_INVALID_ARGS);
-    otIp4CidrFromString(cidrString.c_str(), &cidr);
+    SuccessOrExit(error = otIp4CidrFromString(cidrString.c_str(), &cidr));
     SuccessOrExit(error = otNat64SetIp4Cidr(mNcp->GetThreadHelper()->GetInstance(), &cidr));
 
 exit:
@@ -1909,13 +1956,13 @@ otError DBusThreadObject::GetInfraLinkInfo(DBusMessageIter &aIter)
     ifrFlags = otSysGetInfraNetifFlags();
     otSysCountInfraNetifAddresses(&addressCounters);
 
-    infraLinkInfo.mName                   = otSysGetInfraNetifName();
-    infraLinkInfo.mIsUp                   = (ifrFlags & IFF_UP) != 0;
-    infraLinkInfo.mIsRunning              = (ifrFlags & IFF_RUNNING) != 0;
-    infraLinkInfo.mIsMulticast            = (ifrFlags & IFF_MULTICAST) != 0;
-    infraLinkInfo.mLinkLocalAddresses     = addressCounters.mLinkLocalAddresses;
-    infraLinkInfo.mUniqueLocalAddresses   = addressCounters.mUniqueLocalAddresses;
-    infraLinkInfo.mGlobalUnicastAddresses = addressCounters.mGlobalUnicastAddresses;
+    infraLinkInfo.mName                      = otSysGetInfraNetifName();
+    infraLinkInfo.mIsUp                      = (ifrFlags & IFF_UP) != 0;
+    infraLinkInfo.mIsRunning                 = (ifrFlags & IFF_RUNNING) != 0;
+    infraLinkInfo.mIsMulticast               = (ifrFlags & IFF_MULTICAST) != 0;
+    infraLinkInfo.mLinkLocalAddressCount     = addressCounters.mLinkLocalAddresses;
+    infraLinkInfo.mUniqueLocalAddressCount   = addressCounters.mUniqueLocalAddresses;
+    infraLinkInfo.mGlobalUnicastAddressCount = addressCounters.mGlobalUnicastAddresses;
 
     VerifyOrExit(DBusMessageEncodeToVariant(&aIter, infraLinkInfo) == OTBR_ERROR_NONE, error = OT_ERROR_INVALID_ARGS);
 

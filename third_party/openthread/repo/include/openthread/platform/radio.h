@@ -119,7 +119,7 @@ enum
  * The value is a bit-field indicating the capabilities supported by the radio. See `OT_RADIO_CAPS_*` definitions.
  *
  */
-typedef uint8_t otRadioCaps;
+typedef uint16_t otRadioCaps;
 
 /**
  * Defines constants that are used to indicate different radio capabilities. See `otRadioCaps`.
@@ -136,6 +136,7 @@ enum
     OT_RADIO_CAPS_TRANSMIT_SEC     = 1 << 5, ///< Radio supports tx security.
     OT_RADIO_CAPS_TRANSMIT_TIMING  = 1 << 6, ///< Radio supports tx at specific time.
     OT_RADIO_CAPS_RECEIVE_TIMING   = 1 << 7, ///< Radio supports rx at specific time.
+    OT_RADIO_CAPS_RX_ON_WHEN_IDLE  = 1 << 8, ///< Radio supports RxOnWhenIdle handling.
 };
 
 #define OT_PANID_BROADCAST 0xffff ///< IEEE 802.15.4 Broadcast PAN ID
@@ -259,23 +260,6 @@ typedef struct otRadioFrame
     uint8_t  mChannel; ///< Channel used to transmit/receive the frame.
 
     uint8_t mRadioType; ///< Radio link type - should be ignored by radio driver.
-
-    /**
-     * Interface Id for the incoming/outgoing radio packet.
-     *
-     * This field is used by RCP when OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE is enabled.
-     * If not enabled, this field defaults to zero.
-     *
-     * Incoming packets are marked with the correct IID to deliver to the appropriate host.
-     * RCP determines the IID value based on the destination PAN ID of the received packet.
-     * The IID value of zero indicates the broadcast packet, which will send it to all the hosts.
-     *
-     * For outgoing packets, IID is used to format the transmit done callback for the appropriate
-     * host. RCP extracts the IID value while processing the received spinel frame from the spinel
-     * header.
-     *
-     * */
-    uint8_t mIid;
 
     /**
      * The union of transmit and receive information for a radio frame.
@@ -637,6 +621,38 @@ bool otPlatRadioGetPromiscuous(otInstance *aInstance);
  *
  */
 void otPlatRadioSetPromiscuous(otInstance *aInstance, bool aEnable);
+
+/**
+ * Sets the rx-on-when-idle state to the radio platform.
+ *
+ * There are a few situations that the radio can enter sleep state if the device is in rx-off-when-idle state but
+ * it's hard and costly for the SubMac to identify these situations and instruct the radio to enter sleep:
+ *
+ * - Finalization of a regular frame reception task, provided that:
+ *   - The frame is received without errors and passes the filtering and it's not an spurious ACK.
+ *   - ACK is not requested or transmission of ACK is not possible due to internal conditions.
+ * - Finalization of a frame transmission or transmission of an ACK frame, when ACK is not requested in the transmitted
+ *   frame.
+ * - Finalization of the reception operation of a requested ACK due to:
+ *   - ACK timeout expiration.
+ *   - Reception of an invalid ACK or not an ACK frame.
+ *   - Reception of the proper ACK, unless the transmitted frame was a Data Request Command and the frame pending bit
+ *     on the received ACK is set to true. In this case the radio platform implementation SHOULD keep the receiver on
+ *     until a determined timeout which triggers an idle period start.`OPENTHREAD_CONFIG_MAC_DATA_POLL_TIMEOUT` can be
+ *     taken as a reference for this.
+ * - Finalization of a stand alone CCA task.
+ * - Finalization of a CCA operation with busy result during CSMA/CA procedure.
+ * - Finalization of an Energy Detection task.
+ * - Finalization of a radio reception window scheduled with `otPlatRadioReceiveAt`.
+ *
+ * If a platform supports `OT_RADIO_CAPS_RX_ON_WHEN_IDLE` it must also support `OT_RADIO_CAPS_CSMA_BACKOFF` and handle
+ * idle periods after CCA as described above.
+ *
+ * @param[in]  aInstance    The OpenThread instance structure.
+ * @param[in]  aEnable      TRUE to keep radio in Receive state, FALSE to put to Sleep state during idle periods.
+ *
+ */
+void otPlatRadioSetRxOnWhenIdle(otInstance *aInstance, bool aEnable);
 
 /**
  * Update MAC keys and key index
@@ -1116,15 +1132,29 @@ otError otPlatRadioGetCoexMetrics(otInstance *aInstance, otRadioCoexMetrics *aCo
  *
  * @note Platforms should use CSL peer addresses to include CSL IE when generating enhanced acks.
  *
- * @retval  kErrorNotImplemented Radio driver doesn't support CSL.
- * @retval  kErrorFailed         Other platform specific errors.
- * @retval  kErrorNone           Successfully enabled or disabled CSL.
+ * @retval  OT_ERROR_NOT_IMPLEMENTED Radio driver doesn't support CSL.
+ * @retval  OT_ERROR_FAILED          Other platform specific errors.
+ * @retval  OT_ERROR_NONE            Successfully enabled or disabled CSL.
  *
  */
 otError otPlatRadioEnableCsl(otInstance         *aInstance,
                              uint32_t            aCslPeriod,
                              otShortAddress      aShortAddr,
                              const otExtAddress *aExtAddr);
+
+/**
+ * Reset CSL receiver in the platform.
+ *
+ * @note Defaults to `otPlatRadioEnableCsl(aInstance,0, Mac::kShortAddrInvalid, nullptr);`
+ *
+ * @param[in]  aInstance     The OpenThread instance structure.
+ *
+ * @retval  OT_ERROR_NOT_IMPLEMENTED Radio driver doesn't support CSL.
+ * @retval  OT_ERROR_FAILED          Other platform specific errors.
+ * @retval  OT_ERROR_NONE            Successfully disabled CSL.
+ *
+ */
+otError otPlatRadioResetCsl(otInstance *aInstance);
 
 /**
  * Update CSL sample time in radio driver.

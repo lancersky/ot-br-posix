@@ -250,18 +250,25 @@ OT_TOOL_WEAK uint32_t otPlatRadioGetBusSpeed(otInstance *aInstance)
     return 0;
 }
 
+#if OPENTHREAD_CONFIG_MAC_CSL_RECEIVER_ENABLE
+OT_TOOL_WEAK otError otPlatRadioResetCsl(otInstance *aInstance)
+{
+    return otPlatRadioEnableCsl(aInstance, 0, Mac::kShortAddrInvalid, nullptr);
+}
+#endif
+
 OT_TOOL_WEAK uint8_t otPlatRadioGetCslAccuracy(otInstance *aInstance)
 {
     OT_UNUSED_VARIABLE(aInstance);
 
-    return UINT8_MAX;
+    return NumericLimits<uint8_t>::kMax;
 }
 
 OT_TOOL_WEAK uint8_t otPlatRadioGetCslUncertainty(otInstance *aInstance)
 {
     OT_UNUSED_VARIABLE(aInstance);
 
-    return UINT8_MAX;
+    return NumericLimits<uint8_t>::kMax;
 }
 
 OT_TOOL_WEAK otError otPlatRadioGetFemLnaGain(otInstance *aInstance, int8_t *aGain)
@@ -313,4 +320,10 @@ OT_TOOL_WEAK otError otPlatRadioReceiveAt(otInstance *aInstance, uint8_t aChanne
     OT_UNUSED_VARIABLE(aDuration);
 
     return kErrorNotImplemented;
+}
+
+OT_TOOL_WEAK void otPlatRadioSetRxOnWhenIdle(otInstance *aInstance, bool aEnable)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aEnable);
 }

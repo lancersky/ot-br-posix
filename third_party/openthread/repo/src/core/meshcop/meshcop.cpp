@@ -34,6 +34,7 @@
 
 #include "meshcop.hpp"
 
+#include "common/clearable.hpp"
 #include "common/crc16.hpp"
 #include "common/debug.hpp"
 #include "common/locator_getters.hpp"
@@ -119,7 +120,7 @@ bool JoinerDiscerner::Matches(const Mac::ExtAddress &aJoinerId) const
 
     mask = GetMask();
 
-    return (Encoding::BigEndian::ReadUint64(aJoinerId.m8) & mask) == (mValue & mask);
+    return (BigEndian::ReadUint64(aJoinerId.m8) & mask) == (mValue & mask);
 }
 
 void JoinerDiscerner::CopyTo(Mac::ExtAddress &aExtAddress) const
@@ -136,12 +137,12 @@ void JoinerDiscerner::CopyTo(Mac::ExtAddress &aExtAddress) const
     OT_ASSERT(IsValid());
 
     // Write full bytes
-    while (remaining >= CHAR_BIT)
+    while (remaining >= kBitsPerByte)
     {
         *cur = static_cast<uint8_t>(value & 0xff);
-        value >>= CHAR_BIT;
+        value >>= kBitsPerByte;
         cur--;
-        remaining -= CHAR_BIT;
+        remaining -= kBitsPerByte;
     }
 
     // Write any remaining bits (not a full byte)
@@ -168,11 +169,11 @@ JoinerDiscerner::InfoString JoinerDiscerner::ToString(void) const
 {
     InfoString string;
 
-    if (mLength <= sizeof(uint16_t) * CHAR_BIT)
+    if (mLength <= BitSizeOf(uint16_t))
     {
         string.Append("0x%04x", static_cast<uint16_t>(mValue));
     }
-    else if (mLength <= sizeof(uint32_t) * CHAR_BIT)
+    else if (mLength <= BitSizeOf(uint32_t))
     {
         string.Append("0x%08lx", ToUlong(static_cast<uint32_t>(mValue)));
     }
@@ -191,7 +192,7 @@ void SteeringData::Init(uint8_t aLength)
 {
     OT_ASSERT(aLength <= kMaxLength);
     mLength = aLength;
-    memset(m8, 0, sizeof(m8));
+    ClearAllBytes(m8);
 }
 
 void SteeringData::SetToPermitAllJoiners(void)
@@ -324,7 +325,7 @@ Error GeneratePskc(const char          *aPassPhrase,
                      (networkNameLen <= OT_NETWORK_NAME_MAX_SIZE),
                  error = kErrorInvalidArgs);
 
-    memset(salt, 0, sizeof(salt));
+    ClearAllBytes(salt);
     memcpy(salt, saltPrefix, sizeof(saltPrefix) - 1);
     saltLen += static_cast<uint16_t>(sizeof(saltPrefix) - 1);
 
@@ -334,23 +335,13 @@ Error GeneratePskc(const char          *aPassPhrase,
     memcpy(salt + saltLen, aNetworkName.GetAsCString(), networkNameLen);
     saltLen += networkNameLen;
 
-    otPlatCryptoPbkdf2GenerateKey(reinterpret_cast<const uint8_t *>(aPassPhrase), passphraseLen, salt, saltLen, 16384,
-                                  OT_PSKC_MAX_SIZE, aPskc.m8);
+    error = otPlatCryptoPbkdf2GenerateKey(reinterpret_cast<const uint8_t *>(aPassPhrase), passphraseLen, salt, saltLen,
+                                          16384, OT_PSKC_MAX_SIZE, aPskc.m8);
 
 exit:
     return error;
 }
 #endif // OPENTHREAD_FTD
-
-#if OT_SHOULD_LOG_AT(OT_LOG_LEVEL_WARN)
-void LogError(const char *aActionText, Error aError)
-{
-    if (aError != kErrorNone && aError != kErrorAlready)
-    {
-        LogWarn("Failed to %s: %s", aActionText, ErrorToString(aError));
-    }
-}
-#endif
 
 } // namespace MeshCoP
 } // namespace ot

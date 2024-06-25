@@ -152,6 +152,14 @@ Error InfraIf::HandleStateChanged(uint32_t aIfIndex, bool aIsRunning)
 
     Get<RoutingManager>().HandleInfraIfStateChanged();
 
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    Get<Srp::AdvertisingProxy>().HandleInfraIfStateChanged();
+#endif
+
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE && OPENTHREAD_CONFIG_MULTICAST_DNS_AUTO_ENABLE_ON_INFRA_IF
+    Get<Dns::Multicast::Core>().HandleInfraIfStateChanged();
+#endif
+
 exit:
     return error;
 }

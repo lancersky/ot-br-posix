@@ -64,7 +64,7 @@ void PanIdQueryServer::HandleTmf<kUriPanIdQuery>(Coap::Message &aMessage, const 
     uint32_t mask;
 
     VerifyOrExit(aMessage.IsPostRequest());
-    VerifyOrExit((mask = MeshCoP::ChannelMaskTlv::GetChannelMask(aMessage)) != 0);
+    SuccessOrExit(MeshCoP::ChannelMaskTlv::FindIn(aMessage, mask));
 
     SuccessOrExit(Tlv::Find<MeshCoP::PanIdTlv>(aMessage, panId));
 
@@ -105,17 +105,14 @@ void PanIdQueryServer::HandleScanResult(Mac::ActiveScanResult *aScanResult)
 
 void PanIdQueryServer::SendConflict(void)
 {
-    Error                   error = kErrorNone;
-    MeshCoP::ChannelMaskTlv channelMask;
-    Tmf::MessageInfo        messageInfo(GetInstance());
-    Coap::Message          *message;
+    Error            error = kErrorNone;
+    Tmf::MessageInfo messageInfo(GetInstance());
+    Coap::Message   *message;
 
     message = Get<Tmf::Agent>().NewPriorityConfirmablePostMessage(kUriPanIdConflict);
     VerifyOrExit(message != nullptr, error = kErrorNoBufs);
 
-    channelMask.Init();
-    channelMask.SetChannelMask(mChannelMask);
-    SuccessOrExit(error = channelMask.AppendTo(*message));
+    SuccessOrExit(error = MeshCoP::ChannelMaskTlv::AppendTo(*message, mChannelMask));
 
     SuccessOrExit(error = Tlv::Append<MeshCoP::PanIdTlv>(*message, mPanId));
 
@@ -127,7 +124,7 @@ void PanIdQueryServer::SendConflict(void)
 
 exit:
     FreeMessageOnError(message, error);
-    MeshCoP::LogError("send panid conflict", error);
+    LogWarnOnError(error, "send panid conflict");
 }
 
 void PanIdQueryServer::HandleTimer(void)

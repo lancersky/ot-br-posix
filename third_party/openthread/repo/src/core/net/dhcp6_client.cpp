@@ -57,7 +57,7 @@ Client::Client(Instance &aInstance)
     , mStartTime(0)
     , mIdentityAssociationCurrent(nullptr)
 {
-    memset(mIdentityAssociations, 0, sizeof(mIdentityAssociations));
+    ClearAllBytes(mIdentityAssociations);
 }
 
 bool Client::MatchNetifAddressWithPrefix(const Ip6::Netif::UnicastAddress &aNetifAddress, const Ip6::Prefix &aIp6Prefix)
@@ -288,7 +288,7 @@ exit:
     if (error != kErrorNone)
     {
         FreeMessage(message);
-        LogWarn("Failed to send DHCPv6 Solicit: %s", ErrorToString(error));
+        LogWarnOnError(error, "send DHCPv6 Solicit");
     }
 }
 

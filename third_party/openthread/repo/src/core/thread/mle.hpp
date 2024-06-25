@@ -96,7 +96,9 @@ namespace Mle {
  *
  */
 
+#if OPENTHREAD_FTD
 class MleRouter;
+#endif
 
 /**
  * Implements MLE functionality required by the Thread EndDevices, Router, and Leader roles.
@@ -104,7 +106,9 @@ class MleRouter;
  */
 class Mle : public InstanceLocator, private NonCopyable
 {
+#if OPENTHREAD_FTD
     friend class MleRouter;
+#endif
     friend class DiscoverScanner;
     friend class ot::Instance;
     friend class ot::Notifier;
@@ -527,6 +531,14 @@ public:
     const Ip6::Address &GetMeshLocal64(void) const { return mMeshLocal64.GetAddress(); }
 
     /**
+     * Returns a reference to the ML-EID as a `Netif::UnicastAddress`.
+     *
+     * @returns A reference to the ML-EID.
+     *
+     */
+    Ip6::Netif::UnicastAddress &GetMeshLocal64UnicastAddress(void) { return mMeshLocal64; }
+
+    /**
      * Returns the Router ID of the Leader.
      *
      * @returns The Router ID of the Leader.
@@ -698,6 +710,16 @@ public:
     {
         return (&aAddress == &mLinkLocalAllThreadNodes) || (&aAddress == &mRealmLocalAllThreadNodes);
     }
+
+    /**
+     * Determines the next hop towards an RLOC16 destination.
+     *
+     * @param[in]  aDestination  The RLOC16 of the destination.
+     *
+     * @returns A RLOC16 of the next hop if a route is known, kInvalidRloc16 otherwise.
+     *
+     */
+    uint16_t GetNextHop(uint16_t aDestination) const;
 
 #if OPENTHREAD_CONFIG_MAC_CSL_RECEIVER_ENABLE
     /**
@@ -927,8 +949,8 @@ private:
         kTypeChildIdRequest,
         kTypeChildIdRequestShort,
         kTypeChildIdResponse,
-        kTypeChildUpdateRequestOfParent,
-        kTypeChildUpdateResponseOfParent,
+        kTypeChildUpdateRequestAsChild,
+        kTypeChildUpdateResponseAsChild,
         kTypeDataRequest,
         kTypeDataResponse,
         kTypeDiscoveryRequest,
@@ -951,14 +973,14 @@ private:
         kTypeLinkReject,
         kTypeLinkRequest,
         kTypeParentRequest,
-#if OPENTHREAD_CONFIG_TIME_SYNC_ENABLE
-        kTypeTimeSync,
-#endif
 #endif
 #if OPENTHREAD_CONFIG_MLE_LINK_METRICS_INITIATOR_ENABLE || OPENTHREAD_CONFIG_MLE_LINK_METRICS_SUBJECT_ENABLE
         kTypeLinkMetricsManagementRequest,
         kTypeLinkMetricsManagementResponse,
         kTypeLinkProbe,
+#endif
+#if OPENTHREAD_CONFIG_TIME_SYNC_ENABLE
+        kTypeTimeSync,
 #endif
     };
 
@@ -1106,13 +1128,13 @@ private:
         void InitSecurityControl(void) { mSecurityControl = kKeyIdMode2Mic32; }
         bool IsSecurityControlValid(void) const { return (mSecurityControl == kKeyIdMode2Mic32); }
 
-        uint32_t GetFrameCounter(void) const { return Encoding::LittleEndian::HostSwap32(mFrameCounter); }
-        void     SetFrameCounter(uint32_t aCounter) { mFrameCounter = Encoding::LittleEndian::HostSwap32(aCounter); }
+        uint32_t GetFrameCounter(void) const { return LittleEndian::HostSwap32(mFrameCounter); }
+        void     SetFrameCounter(uint32_t aCounter) { mFrameCounter = LittleEndian::HostSwap32(aCounter); }
 
-        uint32_t GetKeyId(void) const { return Encoding::BigEndian::HostSwap32(mKeySource); }
+        uint32_t GetKeyId(void) const { return BigEndian::HostSwap32(mKeySource); }
         void     SetKeyId(uint32_t aKeySequence)
         {
-            mKeySource = Encoding::BigEndian::HostSwap32(aKeySequence);
+            mKeySource = BigEndian::HostSwap32(aKeySequence);
             mKeyIndex  = (aKeySequence & 0x7f) + 1;
         }
 
@@ -1218,8 +1240,6 @@ private:
     void       SetAttachState(AttachState aState);
     void       InitNeighbor(Neighbor &aNeighbor, const RxInfo &aRxInfo);
     void       ClearParentCandidate(void) { mParentCandidate.Clear(); }
-    Error      CheckReachability(uint16_t aMeshDest, const Ip6::Header &aIp6Header);
-    uint16_t   GetNextHop(uint16_t aDestination) const;
     Error      SendDataRequest(const Ip6::Address &aDestination);
     void       HandleNotifierEvents(Events aEvents);
     void       SendDelayedResponse(TxMessage &aMessage, const DelayedResponseMetadata &aMetadata);
@@ -1230,7 +1250,9 @@ private:
     Error      SendChildUpdateRequest(ChildUpdateRequestMode aMode);
     Error      SendDataRequestAfterDelay(const Ip6::Address &aDestination, uint16_t aDelay);
     Error      SendChildUpdateRequest(void);
-    Error      SendChildUpdateResponse(const TlvList &aTlvList, const RxChallenge &aChallenge);
+    Error      SendChildUpdateResponse(const TlvList      &aTlvList,
+                                       const RxChallenge  &aChallenge,
+                                       const Ip6::Address &aDestination);
     void       SetRloc16(uint16_t aRloc16);
     void       SetStateDetached(void);
     void       SetStateChild(uint16_t aRloc16);
@@ -1289,6 +1311,10 @@ private:
 #if OPENTHREAD_CONFIG_TMF_NETDATA_SERVICE_ENABLE
     ServiceAloc *FindInServiceAlocs(uint16_t aAloc16);
     void         UpdateServiceAlocs(void);
+#endif
+
+#if OPENTHREAD_CONFIG_TIME_SYNC_ENABLE
+    void HandleTimeSync(RxInfo &aRxInfo);
 #endif
 
 #if OPENTHREAD_CONFIG_MLE_LINK_METRICS_SUBJECT_ENABLE

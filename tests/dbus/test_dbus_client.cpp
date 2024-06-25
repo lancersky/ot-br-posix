@@ -182,6 +182,24 @@ void CheckSrpServerInfo(ThreadApiDBus *aApi)
     TEST_ASSERT(srpServerInfo.mResponseCounters.mOther == 0);
 }
 
+void CheckTrelInfo(ThreadApiDBus *aApi)
+{
+    OTBR_UNUSED_VARIABLE(aApi);
+
+#if OTBR_ENABLE_TREL
+    otbr::DBus::TrelInfo trelInfo;
+
+    TEST_ASSERT(aApi->GetTrelInfo(trelInfo) == OTBR_ERROR_NONE);
+    TEST_ASSERT(trelInfo.mEnabled);
+    TEST_ASSERT(trelInfo.mNumTrelPeers == 0);
+    TEST_ASSERT(trelInfo.mTrelCounters.mTxPackets == 0);
+    TEST_ASSERT(trelInfo.mTrelCounters.mTxBytes == 0);
+    TEST_ASSERT(trelInfo.mTrelCounters.mTxFailure == 0);
+    TEST_ASSERT(trelInfo.mTrelCounters.mRxPackets == 0);
+    TEST_ASSERT(trelInfo.mTrelCounters.mRxBytes == 0);
+#endif
+}
+
 void CheckDnssdCounters(ThreadApiDBus *aApi)
 {
     OTBR_UNUSED_VARIABLE(aApi);
@@ -281,13 +299,34 @@ void CheckTelemetryData(ThreadApiDBus *aApi)
 #if OTBR_ENABLE_DNSSD_DISCOVERY_PROXY
     TEST_ASSERT(telemetryData.wpan_border_router().dns_server().response_counters().server_failure_count() == 0);
 #endif
+#if OTBR_ENABLE_TREL
+    TEST_ASSERT(telemetryData.wpan_border_router().trel_info().is_trel_enabled());
+    TEST_ASSERT(telemetryData.wpan_border_router().trel_info().has_counters());
+    TEST_ASSERT(telemetryData.wpan_border_router().trel_info().counters().trel_tx_packets() == 0);
+    TEST_ASSERT(telemetryData.wpan_border_router().trel_info().counters().trel_tx_bytes() == 0);
+#endif
+#if OTBR_ENABLE_BORDER_ROUTING
+    TEST_ASSERT(telemetryData.wpan_border_router().infra_link_info().name() == "lo");
+    TEST_ASSERT(telemetryData.wpan_border_router().infra_link_info().is_up());
+    TEST_ASSERT(telemetryData.wpan_border_router().infra_link_info().is_running());
+    TEST_ASSERT(!telemetryData.wpan_border_router().infra_link_info().is_multicast());
+    TEST_ASSERT(telemetryData.wpan_border_router().infra_link_info().link_local_address_count() == 0);
+    TEST_ASSERT(telemetryData.wpan_border_router().infra_link_info().unique_local_address_count() == 0);
+    TEST_ASSERT(telemetryData.wpan_border_router().infra_link_info().global_unicast_address_count() == 0);
+#endif
     TEST_ASSERT(telemetryData.wpan_border_router().mdns().service_registration_responses().success_count() > 0);
 #if OTBR_ENABLE_NAT64
     TEST_ASSERT(telemetryData.wpan_border_router().nat64_state().prefix_manager_state() ==
                 threadnetwork::TelemetryData::NAT64_STATE_NOT_RUNNING);
 #endif
+#if OTBR_ENABLE_DHCP6_PD
+    TEST_ASSERT(!telemetryData.wpan_border_router().hashed_pd_prefix().empty());
+#endif
     TEST_ASSERT(telemetryData.wpan_rcp().rcp_interface_statistics().transferred_frames_count() > 0);
     TEST_ASSERT(telemetryData.coex_metrics().count_tx_request() > 0);
+#if OTBR_ENABLE_LINK_METRICS_TELEMETRY
+    TEST_ASSERT(telemetryData.low_power_metrics().link_metrics_entries_size() >= 0);
+#endif
 }
 #endif
 
@@ -417,6 +456,7 @@ int main()
                             TEST_ASSERT(api->GetRadioTxPower(txPower) == OTBR_ERROR_NONE);
                             TEST_ASSERT(api->GetActiveDatasetTlvs(activeDataset) == OTBR_ERROR_NONE);
                             CheckSrpServerInfo(api.get());
+                            CheckTrelInfo(api.get());
                             CheckMdnsInfo(api.get());
                             CheckDnssdCounters(api.get());
                             CheckNat64(api.get());

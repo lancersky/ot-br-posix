@@ -46,7 +46,6 @@
 
 #include "common/code_utils.hpp"
 #include "common/debug.hpp"
-#include "mac/sub_mac.hpp"
 #include "radio/radio.hpp"
 
 namespace ot {
@@ -55,6 +54,43 @@ namespace Ncp {
 // ----------------------------------------------------------------------------
 // MARK: Utility Functions
 // ----------------------------------------------------------------------------
+
+uint8_t NcpBase::InstanceToIid(Instance *aInstance)
+{
+    uint8_t index = 0;
+
+    OT_UNUSED_VARIABLE(aInstance);
+
+#if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE && OPENTHREAD_RADIO
+    index = SPINEL_HEADER_GET_IID(SPINEL_HEADER_IID_BROADCAST); // use broadcast if no match
+
+    for (int i = 0; i < kSpinelInterfaceCount; i++)
+    {
+        if (aInstance == mInstances[i])
+        {
+            index = i;
+            break;
+        }
+    }
+#endif // OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE  && OPENTHREAD_RADIO
+
+    return index;
+}
+
+Instance *NcpBase::IidToInstance(uint8_t aIid)
+{
+    Instance *instance;
+    OT_ASSERT(aIid < kSpinelInterfaceCount);
+
+#if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE && OPENTHREAD_RADIO
+    instance = mInstances[aIid];
+#else
+    OT_UNUSED_VARIABLE(aIid);
+    instance = mInstance;
+#endif // OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE  && OPENTHREAD_RADIO
+
+    return instance;
+}
 
 #if OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
 static bool HasOnly1BitSet(uint32_t aValue) { return aValue != 0 && ((aValue & (aValue - 1)) == 0); }
@@ -203,6 +239,29 @@ static spinel_status_t ResetReasonToSpinelStatus(otPlatResetReason aReason)
 
 NcpBase *NcpBase::sNcpInstance = nullptr;
 
+#if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE && OPENTHREAD_RADIO
+NcpBase::NcpBase(Instance **aInstances, uint8_t aCount)
+    : NcpBase(aInstances[0])
+{
+    OT_ASSERT(aCount > 0);
+    OT_ASSERT(aCount < SPINEL_HEADER_IID_MAX); // One IID reserved for broadcast
+
+    uint8_t skipped = 0;
+
+    for (int i = 0; i < aCount; i++)
+    {
+        if ((i + skipped) == SPINEL_HEADER_GET_IID(SPINEL_HEADER_IID_BROADCAST))
+        {
+            mInstances[i + skipped] = nullptr;
+            skipped++;
+        }
+
+        OT_ASSERT(i + skipped <= SPINEL_HEADER_IID_MAX);
+        mInstances[i + skipped] = aInstances[i];
+    }
+}
+#endif // OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE  && OPENTHREAD_RADIO
+
 NcpBase::NcpBase(Instance *aInstance)
     : mInstance(aInstance)
     , mTxFrameBuffer(mTxBuffer, sizeof(mTxBuffer))
@@ -214,11 +273,6 @@ NcpBase::NcpBase(Instance *aInstance)
     , mDiscoveryScanJoinerFlag(false)
     , mDiscoveryScanEnableFiltering(false)
     , mDiscoveryScanPanId(0xffff)
-#if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
-#if OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
-    , mHandlePendingCommandsTask(*aInstance, NcpBase::HandlePendingCommands)
-#endif
-#endif
     , mUpdateChangedPropsTask(*aInstance, NcpBase::UpdateChangedProps)
     , mThreadChangedFlags(0)
     , mHostPowerState(SPINEL_HOST_POWER_STATE_ONLINE)
@@ -232,7 +286,6 @@ NcpBase::NcpBase(Instance *aInstance)
     , mResponseQueueTail(0)
     , mAllowLocalNetworkDataChange(false)
     , mRequireJoinExistingNetwork(false)
-    , mIsRawStreamEnabled(false)
     , mPcapEnabled(false)
     , mDisableStreamWrite(false)
     , mShouldEmitChildTableUpdate(false)
@@ -242,16 +295,7 @@ NcpBase::NcpBase(Instance *aInstance)
 #if OPENTHREAD_FTD
     , mPreferredRouteId(0)
 #endif
-    , mCurCommandIID(0)
-#if OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
-    , mCurTransmitTID(0)
-    , mCurScanChannel(kInvalidScanChannel)
-    , mSrcMatchEnabled(false)
-#if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
-    , mPendingCommandQueueHead(0)
-    , mPendingCommandQueueTail(0)
-#endif // OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
-#endif // OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
+    , mCurCommandIid(0)
 #if OPENTHREAD_MTD || OPENTHREAD_FTD
     , mInboundSecureIpFrameCounter(0)
     , mInboundInsecureIpFrameCounter(0)
@@ -277,7 +321,12 @@ NcpBase::NcpBase(Instance *aInstance)
     mTxFrameBuffer.SetFrameRemovedCallback(&NcpBase::HandleFrameRemovedFromNcpBuffer, this);
 
     memset(&mResponseQueue, 0, sizeof(mResponseQueue));
-
+#if OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
+    memset(mCurTransmitTID, 0, sizeof(mCurTransmitTID));
+    memset(mSrcMatchEnabled, 0, sizeof(mSrcMatchEnabled));
+    memset(mCurScanChannel, kInvalidScanChannel, sizeof(mCurScanChannel));
+#endif
+    memset(mIsRawStreamEnabled, 0, sizeof(mIsRawStreamEnabled));
     memset(mNextExpectedTid, 0, sizeof(mNextExpectedTid));
 
 #if OPENTHREAD_MTD || OPENTHREAD_FTD
@@ -291,7 +340,7 @@ NcpBase::NcpBase(Instance *aInstance)
 #if OPENTHREAD_CONFIG_UDP_FORWARD_ENABLE
     otUdpForwardSetForwarder(mInstance, &NcpBase::HandleUdpForwardStream, this);
 #endif
-    otIcmp6SetEchoMode(mInstance, OT_ICMP6_ECHO_HANDLER_DISABLED);
+    otIcmp6SetEchoMode(mInstance, OT_ICMP6_ECHO_HANDLER_RLOC_ALOC_ONLY);
 #if OPENTHREAD_FTD
     otThreadRegisterNeighborTableCallback(mInstance, &NcpBase::HandleNeighborTableChanged);
 #if OPENTHREAD_CONFIG_MLE_STEERING_DATA_SET_OOB_ENABLE
@@ -315,7 +364,7 @@ NcpBase::NcpBase(Instance *aInstance)
 
 NcpBase *NcpBase::GetNcpInstance(void) { return sNcpInstance; }
 
-spinel_iid_t NcpBase::GetCurCommandIid(void) const { return mCurCommandIID; }
+spinel_iid_t NcpBase::GetCurCommandIid(void) const { return mCurCommandIid; }
 
 void NcpBase::ResetCounters(void)
 {
@@ -362,9 +411,20 @@ void NcpBase::HandleReceive(const uint8_t *aBuf, uint16_t aBufLength)
 
     mRxSpinelFrameCounter++;
 
-    mCurCommandIID = SPINEL_HEADER_GET_IID(header);
+    mCurCommandIid = SPINEL_HEADER_GET_IID(header);
 
-    if (mCurCommandIID >= kSpinelHeaderMaxNumIID)
+#if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
+    if (mCurCommandIid > SPINEL_HEADER_IID_MAX)
+#else
+    if (mCurCommandIid != 0)
+#endif
+    {
+        IgnoreError(WriteLastStatusFrame(header, SPINEL_STATUS_INVALID_INTERFACE));
+        ExitNow();
+    }
+
+    mInstance = IidToInstance(mCurCommandIid);
+    if (mInstance == nullptr)
     {
         IgnoreError(WriteLastStatusFrame(header, SPINEL_STATUS_INVALID_INTERFACE));
         ExitNow();
@@ -389,16 +449,16 @@ void NcpBase::HandleReceive(const uint8_t *aBuf, uint16_t aBufLength)
         IgnoreError(SendQueuedResponses());
     }
 
-    // Check for out of sequence TIDs and update `mNextExpectedTid[]`,
+    // Check for out of sequence TIDs and update `mNextExpectedTid`,
 
     tid = SPINEL_HEADER_GET_TID(header);
 
-    if ((mNextExpectedTid[mCurCommandIID] != 0) && (tid != mNextExpectedTid[mCurCommandIID]))
+    if ((mNextExpectedTid[mCurCommandIid] != 0) && (tid != mNextExpectedTid[mCurCommandIid]))
     {
         mRxSpinelOutOfOrderTidCounter++;
     }
 
-    mNextExpectedTid[mCurCommandIID] = SPINEL_GET_NEXT_TID(tid);
+    mNextExpectedTid[mCurCommandIid] = SPINEL_GET_NEXT_TID(tid);
 
 exit:
     mDisableStreamWrite = false;
@@ -484,7 +544,7 @@ void NcpBase::IncrementFrameErrorCounter(void) { mFramingErrorCounter++; }
 otError NcpBase::StreamWrite(int aStreamId, const uint8_t *aDataPtr, int aDataLen)
 {
     otError           error  = OT_ERROR_NONE;
-    uint8_t           header = SPINEL_HEADER_FLAG | SPINEL_HEADER_IID_0;
+    uint8_t           header = SPINEL_HEADER_FLAG | SPINEL_HEADER_TX_NOTIFICATION_IID;
     spinel_prop_key_t streamPropKey;
 
     if (aStreamId == 0)
@@ -659,7 +719,7 @@ unsigned int NcpBase::ConvertLogRegion(otLogRegion aLogRegion)
 void NcpBase::Log(otLogLevel aLogLevel, otLogRegion aLogRegion, const char *aLogString)
 {
     otError error  = OT_ERROR_NONE;
-    uint8_t header = SPINEL_HEADER_FLAG | SPINEL_HEADER_IID_0;
+    uint8_t header = SPINEL_HEADER_FLAG | SPINEL_HEADER_TX_NOTIFICATION_IID;
 
     VerifyOrExit(!mDisableStreamWrite, error = OT_ERROR_INVALID_STATE);
     VerifyOrExit(!mChangedPropsSet.IsPropertyFiltered(SPINEL_PROP_STREAM_LOG));
@@ -701,14 +761,14 @@ void NcpBase::RegisterPeekPokeDelegates(otNcpDelegateAllowPeekPoke aAllowPeekDel
 // MARK: Spinel Response Handling
 // ----------------------------------------------------------------------------
 
-uint8_t NcpBase::GetWrappedQueueIndex(uint8_t aPosition, uint8_t aQueueSize)
+uint8_t NcpBase::GetWrappedResponseQueueIndex(uint8_t aPosition)
 {
-    while (aPosition >= aQueueSize)
+    while (aPosition >= kResponseQueueSize)
     {
-        aPosition -= aQueueSize;
+        aPosition -= kResponseQueueSize;
     }
 
-    return aPosition % aQueueSize;
+    return aPosition;
 }
 
 otError NcpBase::EnqueueResponse(uint8_t aHeader, ResponseType aType, unsigned int aPropKeyOrStatus)
@@ -751,7 +811,7 @@ otError NcpBase::EnqueueResponse(uint8_t aHeader, ResponseType aType, unsigned i
     {
         for (uint8_t cur = mResponseQueueHead; cur < mResponseQueueTail; cur++)
         {
-            entry = &mResponseQueue[GetWrappedQueueIndex(cur, kResponseQueueSize)];
+            entry = &mResponseQueue[GetWrappedResponseQueueIndex(cur)];
 
             if (entry->mIsInUse && (entry->mIid == iid) && (entry->mTid == tid))
             {
@@ -766,7 +826,7 @@ otError NcpBase::EnqueueResponse(uint8_t aHeader, ResponseType aType, unsigned i
 
     // Add the new entry in the queue at tail.
 
-    entry = &mResponseQueue[GetWrappedQueueIndex(mResponseQueueTail, kResponseQueueSize)];
+    entry = &mResponseQueue[GetWrappedResponseQueueIndex(mResponseQueueTail)];
 
     entry->mIid             = iid;
     entry->mTid             = tid;
@@ -824,152 +884,13 @@ otError NcpBase::SendQueuedResponses(void)
             // the queue.
 
             mResponseQueueHead = 0;
-            mResponseQueueTail = GetWrappedQueueIndex(mResponseQueueTail, kResponseQueueSize);
+            mResponseQueueTail = GetWrappedResponseQueueIndex(mResponseQueueTail);
         }
     }
 
 exit:
     return error;
 }
-
-// ----------------------------------------------------------------------------
-// MARK: Spinel Pending Command Queue
-// ----------------------------------------------------------------------------
-
-#if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
-#if OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
-
-otError NcpBase::EnqueuePendingCommand(PendingCommandType aType, uint8_t aHeader, uint8_t aScanChannel)
-{
-    otError              error = OT_ERROR_NONE;
-    PendingCommandEntry *entry;
-
-    if ((mPendingCommandQueueTail - mPendingCommandQueueHead) >= kPendingCommandQueueSize)
-    {
-        // If there is no room a for a response, emit an unsolicited
-        // `DROPPED` error status to indicate a spinel response was
-        // dropped.
-        mChangedPropsSet.AddLastStatus(SPINEL_STATUS_DROPPED);
-        ExitNow(error = OT_ERROR_NO_BUFS);
-    }
-
-    // Add the new entry in the queue at tail.
-    entry = &mPendingCommandQueue[GetWrappedQueueIndex(mPendingCommandQueueTail, kPendingCommandQueueSize)];
-
-    entry->mType = aType;
-    switch (aType)
-    {
-    case kPendingCommandTypeTransmit:
-        entry->mIid                 = SPINEL_HEADER_GET_IID(aHeader);
-        entry->mTid                 = SPINEL_HEADER_GET_TID(aHeader);
-        entry->mTransmitFrame.mPsdu = entry->mTransmitPsdu;
-        SuccessOrExit(error = DecodeStreamRawTxRequest(entry->mTransmitFrame));
-        break;
-
-    case kPendingCommandTypeEnergyScan:
-        // We dont have access to header, but mCurCommandIID
-        // is updated in HandleReceive, use that instead.
-        entry->mIid         = mCurCommandIID;
-        entry->mScanChannel = aScanChannel;
-        break;
-
-    default:
-        ExitNow(error = OT_ERROR_NOT_FOUND);
-    }
-
-    mPendingCommandQueueTail++;
-
-exit:
-    return error;
-}
-
-otError NcpBase::HandlePendingTransmit(PendingCommandEntry *aEntry)
-{
-    otError       error = OT_ERROR_NONE;
-    otRadioFrame *frame;
-    uint8_t      *savePsdu;
-
-    mCurTransmitTID = aEntry->mTid;
-    mCurTransmitIID = aEntry->mIid;
-    VerifyOrExit(otLinkRawIsEnabled(mInstance), error = OT_ERROR_INVALID_STATE);
-    frame = otLinkRawGetTransmitBuffer(mInstance);
-    VerifyOrExit(frame != nullptr, error = OT_ERROR_NO_BUFS);
-    savePsdu = frame->mPsdu;
-    *frame   = aEntry->mTransmitFrame;
-    VerifyOrExit(frame->mLength <= OT_RADIO_FRAME_MAX_SIZE, error = OT_ERROR_PARSE);
-    frame->mPsdu = savePsdu;
-    memcpy(frame->mPsdu, aEntry->mTransmitFrame.mPsdu, frame->mLength);
-    frame->mIid = aEntry->mIid;
-    SuccessOrExit(error = otLinkRawTransmit(mInstance, &NcpBase::LinkRawTransmitDone));
-
-exit:
-    if (error != OT_ERROR_NONE)
-    {
-        LinkRawTransmitDone(&aEntry->mTransmitFrame, nullptr, error);
-    }
-    return error;
-}
-
-otError NcpBase::HandlePendingEnergyScan(PendingCommandEntry *aEntry)
-{
-    otError error = OT_ERROR_NONE;
-
-    VerifyOrExit(mCurScanChannel == kInvalidScanChannel, error = OT_ERROR_INVALID_STATE);
-
-    mCurScanChannel = static_cast<int8_t>(aEntry->mScanChannel);
-    mCurTransmitIID = aEntry->mIid;
-
-    SuccessOrExit(error = otLinkRawEnergyScan(mInstance, aEntry->mScanChannel, mScanPeriod, LinkRawEnergyScanDone));
-
-exit:
-    if (error != OT_ERROR_NONE)
-    {
-        LinkRawEnergyScanDone(Radio::kInvalidRssi);
-    }
-    return error;
-}
-
-void NcpBase::HandlePendingCommands(Tasklet &aTasklet)
-{
-    OT_UNUSED_VARIABLE(aTasklet);
-    GetNcpInstance()->HandlePendingCommands();
-}
-
-void NcpBase::HandlePendingCommands(void)
-{
-    bool submitted = false;
-
-    // Process the queue until a command is successfully submitted
-    while (mPendingCommandQueueHead != mPendingCommandQueueTail && !submitted)
-    {
-        PendingCommandEntry *entry = &mPendingCommandQueue[mPendingCommandQueueHead];
-
-        // Dequeue even in the event of an error
-        mPendingCommandQueueHead++;
-
-        if (mPendingCommandQueueHead == kPendingCommandQueueSize)
-        {
-            mPendingCommandQueueHead = 0;
-            mPendingCommandQueueTail = GetWrappedQueueIndex(mPendingCommandQueueTail, kPendingCommandQueueSize);
-        }
-
-        switch (entry->mType)
-        {
-        case kPendingCommandTypeTransmit:
-            submitted = (HandlePendingTransmit(entry) == OT_ERROR_NONE);
-            break;
-
-        case kPendingCommandTypeEnergyScan:
-            submitted = (HandlePendingEnergyScan(entry) == OT_ERROR_NONE);
-            break;
-        }
-    }
-}
-
-size_t NcpBase::GetPendingCommandQueueSize(void) const { return mPendingCommandQueueTail - mPendingCommandQueueHead; }
-
-#endif // OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
-#endif // OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
 
 // ----------------------------------------------------------------------------
 // MARK: Property/Status Changed
@@ -1013,11 +934,11 @@ void NcpBase::UpdateChangedProps(void)
                 status = ResetReasonToSpinelStatus(otPlatGetResetReason(mInstance));
             }
 
-            SuccessOrExit(WriteLastStatusFrame(SPINEL_HEADER_FLAG | SPINEL_HEADER_IID_0, status));
+            SuccessOrExit(WriteLastStatusFrame(SPINEL_HEADER_FLAG | SPINEL_HEADER_TX_NOTIFICATION_IID, status));
         }
         else if (mDidInitialUpdates)
         {
-            SuccessOrExit(WritePropertyValueIsFrame(SPINEL_HEADER_FLAG | SPINEL_HEADER_IID_0, propKey));
+            SuccessOrExit(WritePropertyValueIsFrame(SPINEL_HEADER_FLAG | SPINEL_HEADER_TX_NOTIFICATION_IID, propKey));
         }
 
         mChangedPropsSet.RemoveEntry(index);
@@ -1258,7 +1179,7 @@ otError NcpBase::WriteLastStatusFrame(uint8_t aHeader, spinel_status_t aLastStat
 {
     otError error = OT_ERROR_NONE;
 
-    if (SPINEL_HEADER_GET_IID(aHeader) == 0)
+    if (SPINEL_HEADER_GET_IID(aHeader) == SPINEL_HEADER_GET_IID(SPINEL_HEADER_TX_NOTIFICATION_IID))
     {
         mLastStatus = aLastStatus;
     }
@@ -1357,15 +1278,17 @@ otError NcpBase::CommandHandler_RESET(uint8_t aHeader)
     {
         otInstanceResetRadioStack(mInstance);
 
-        mIsRawStreamEnabled = false;
-        mCurTransmitTID     = 0;
-        mCurScanChannel     = kInvalidScanChannel;
-        mSrcMatchEnabled    = false;
+        mIsRawStreamEnabled[mCurCommandIid] = false;
+        mCurTransmitTID[mCurCommandIid]     = 0;
+        mCurScanChannel[mCurCommandIid]     = kInvalidScanChannel;
+        mSrcMatchEnabled[mCurCommandIid]    = false;
 
         ResetCounters();
 
-        SuccessOrAssert(
-            error = WriteLastStatusFrame(SPINEL_HEADER_FLAG | SPINEL_HEADER_IID_0, SPINEL_STATUS_RESET_POWER_ON));
+        mEncoder.ClearNcpBuffer();
+
+        SuccessOrAssert(error = WriteLastStatusFrame(SPINEL_HEADER_FLAG | SPINEL_HEADER_TX_NOTIFICATION_IID,
+                                                     SPINEL_STATUS_RESET_POWER_ON));
     }
 #if OPENTHREAD_CONFIG_PLATFORM_BOOTLOADER_MODE_ENABLE
     else if (reset_type == SPINEL_RESET_BOOTLOADER)
@@ -1557,7 +1480,7 @@ template <> otError NcpBase::HandlePropertySet<SPINEL_PROP_PHY_CHAN>(void)
 
     // Make sure we are update the receiving channel if raw link is enabled and we have raw
     // stream enabled already
-    if (otLinkRawIsEnabled(mInstance) && mIsRawStreamEnabled)
+    if (otLinkRawIsEnabled(mInstance) && mIsRawStreamEnabled[mCurCommandIid])
     {
         error = otLinkRawReceive(mInstance);
     }
@@ -1616,6 +1539,18 @@ exit:
     return error;
 }
 
+template <> otError NcpBase::HandlePropertySet<SPINEL_PROP_MAC_RX_ON_WHEN_IDLE_MODE>(void)
+{
+    bool    enabled;
+    otError error = OT_ERROR_NONE;
+
+    SuccessOrExit(error = mDecoder.ReadBool(enabled));
+    otPlatRadioSetRxOnWhenIdle(mInstance, enabled);
+
+exit:
+    return error;
+}
+
 template <> otError NcpBase::HandlePropertyGet<SPINEL_PROP_MAC_15_4_PANID>(void)
 {
     return mEncoder.WriteUint16(otLinkGetPanId(mInstance));
@@ -1659,7 +1594,7 @@ template <> otError NcpBase::HandlePropertyGet<SPINEL_PROP_MAC_15_4_SADDR>(void)
 
 template <> otError NcpBase::HandlePropertyGet<SPINEL_PROP_MAC_RAW_STREAM_ENABLED>(void)
 {
-    return mEncoder.WriteBool(mIsRawStreamEnabled);
+    return mEncoder.WriteBool(mIsRawStreamEnabled[mCurCommandIid]);
 }
 
 template <> otError NcpBase::HandlePropertySet<SPINEL_PROP_MAC_RAW_STREAM_ENABLED>(void)
@@ -1685,7 +1620,7 @@ template <> otError NcpBase::HandlePropertySet<SPINEL_PROP_MAC_RAW_STREAM_ENABLE
 
 #endif // OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
 
-    mIsRawStreamEnabled = enabled;
+    mIsRawStreamEnabled[mCurCommandIid] = enabled;
 
 exit:
     return error;
@@ -1774,7 +1709,8 @@ template <> otError NcpBase::HandlePropertyGet<SPINEL_PROP_MAC_SCAN_STATE>(void)
 
     if (otLinkRawIsEnabled(mInstance))
     {
-        scanState = (mCurScanChannel == kInvalidScanChannel) ? SPINEL_SCAN_STATE_IDLE : SPINEL_SCAN_STATE_ENERGY;
+        scanState = (mCurScanChannel[mCurCommandIid] == kInvalidScanChannel) ? SPINEL_SCAN_STATE_IDLE
+                                                                             : SPINEL_SCAN_STATE_ENERGY;
     }
     else
 
@@ -1832,25 +1768,13 @@ template <> otError NcpBase::HandlePropertySet<SPINEL_PROP_MAC_SCAN_STATE>(void)
 
             // Make sure we aren't already scanning and that we have
             // only 1 bit set for the channel mask.
-            VerifyOrExit(mCurScanChannel == kInvalidScanChannel, error = OT_ERROR_INVALID_STATE);
+            VerifyOrExit(mCurScanChannel[mCurCommandIid] == kInvalidScanChannel, error = OT_ERROR_INVALID_STATE);
             VerifyOrExit(HasOnly1BitSet(mScanChannelMask), error = OT_ERROR_INVALID_ARGS);
 
-            scanChannel = IndexOfMSB(mScanChannelMask);
+            scanChannel                     = IndexOfMSB(mScanChannelMask);
+            mCurScanChannel[mCurCommandIid] = static_cast<int8_t>(scanChannel);
 
             error = otLinkRawEnergyScan(mInstance, scanChannel, mScanPeriod, LinkRawEnergyScanDone);
-
-            if (error != OT_ERROR_NONE)
-            {
-#if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
-                VerifyOrExit(error != OT_ERROR_NOT_IMPLEMENTED);
-                ExitNow(error = EnqueuePendingCommand(kPendingCommandTypeEnergyScan, 0, scanChannel));
-#else
-                ExitNow();
-#endif // OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE
-            }
-
-            mCurScanChannel = static_cast<int8_t>(scanChannel);
-            mCurTransmitIID = mCurCommandIID;
         }
         else
 #endif // OPENTHREAD_RADIO || OPENTHREAD_CONFIG_LINK_RAW_ENABLE
@@ -1924,8 +1848,8 @@ exit:
 
     if (error != OT_ERROR_NONE)
     {
-        IgnoreError(
-            WritePropertyValueIsFrame(SPINEL_HEADER_FLAG | SPINEL_HEADER_IID_0, SPINEL_PROP_UNSOL_UPDATE_FILTER));
+        IgnoreError(WritePropertyValueIsFrame(SPINEL_HEADER_FLAG | SPINEL_HEADER_TX_NOTIFICATION_IID,
+                                              SPINEL_PROP_UNSOL_UPDATE_FILTER));
     }
 
     return error;
@@ -2021,6 +1945,10 @@ template <> otError NcpBase::HandlePropertyGet<SPINEL_PROP_CAPS>(void)
 
 #if OPENTHREAD_CONFIG_PLATFORM_BOOTLOADER_MODE_ENABLE
     SuccessOrExit(error = mEncoder.WriteUintPacked(SPINEL_CAP_RCP_RESET_TO_BOOTLOADER));
+#endif
+
+#if OPENTHREAD_CONFIG_PLATFORM_LOG_CRASH_DUMP_ENABLE
+    SuccessOrExit(error = mEncoder.WriteUintPacked(SPINEL_CAP_RCP_LOG_CRASH_DUMP));
 #endif
 
 #if OPENTHREAD_PLATFORM_POSIX
@@ -2152,7 +2080,19 @@ template <> otError NcpBase::HandlePropertyGet<SPINEL_PROP_NCP_VERSION>(void)
 
 template <> otError NcpBase::HandlePropertyGet<SPINEL_PROP_INTERFACE_COUNT>(void)
 {
-    return mEncoder.WriteUint8(1); // Only one interface for now
+    uint8_t instances = 1;
+#if OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE && OPENTHREAD_RADIO
+    instances = 0;
+    for (uint8_t i = 0; i <= SPINEL_HEADER_IID_MAX; i++)
+    {
+        if (mInstances[i] != nullptr)
+        {
+            instances++;
+        }
+    }
+#endif // OPENTHREAD_CONFIG_MULTIPAN_RCP_ENABLE  && OPENTHREAD_RADIO
+
+    return mEncoder.WriteUint8(instances);
 }
 
 #if OPENTHREAD_CONFIG_NCP_ENABLE_MCU_POWER_STATE_CONTROL
@@ -2808,11 +2748,6 @@ otError otNcpStreamWrite(int aStreamId, const uint8_t *aDataPtr, int aDataLen)
     }
 
     return error;
-}
-
-extern "C" spinel_iid_t otNcpPlatGetCurCommandIid(void)
-{
-    return ot::Ncp::NcpBase::GetNcpInstance()->GetCurCommandIid();
 }
 
 #if (OPENTHREAD_CONFIG_LOG_OUTPUT == OPENTHREAD_CONFIG_LOG_OUTPUT_APP)

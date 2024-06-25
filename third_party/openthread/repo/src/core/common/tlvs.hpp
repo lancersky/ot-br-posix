@@ -46,8 +46,6 @@
 
 namespace ot {
 
-using ot::Encoding::BigEndian::HostSwap16;
-
 class Message;
 
 /**
@@ -174,6 +172,74 @@ public:
      *
      */
     Error AppendTo(Message &aMessage) const;
+
+    /**
+     * Reads the value of TLV treating it as a given simple TLV type.
+     *
+     * This method requires the TLV to be already validated, in particular, its length MUST NOT be less than the
+     * required size of the value type. The TLV MUST NOT be extended. If these conditions are not met, the behavior of
+     * this method is undefined.
+     *
+     * @tparam  SimpleTlvType   The simple TLV type to read (must be a sub-class of `SimpleTlvInfo`).
+     *
+     * @returns The TLV value as `SimpleTlvType::ValueType`.
+     *
+     */
+    template <typename SimpleTlvType> const typename SimpleTlvType::ValueType &ReadValueAs(void) const
+    {
+        return *reinterpret_cast<const typename SimpleTlvType::ValueType *>(this + 1);
+    }
+
+    /**
+     * Reads the value of TLV treating it as a given integer-value TLV type.
+     *
+     * This method requires the TLV to be already validated, in particular, its length MUST NOT be less than the
+     * required size of the value type. The TLV MUST NOT be extended. If these conditions are not met, the behavior of
+     * this method is undefined.
+     *
+     * @tparam  UintTlvType     The integer simple TLV type to read (must be a sub-class of `UintTlvInfo`).
+     *
+     * @returns The TLV value as `UintTlvInfo::UintValueType`.
+     *
+     */
+    template <typename UintTlvType> typename UintTlvType::UintValueType ReadValueAs(void) const
+    {
+        return BigEndian::Read<typename UintTlvType::UintValueType>(reinterpret_cast<const uint8_t *>(this + 1));
+    }
+
+    /**
+     * Writes the value of TLV treating it as a given simple TLV type.
+     *
+     * This method requires the TLV to be already validated, in particular, its length MUST NOT be less than the
+     * required size of the value type. The TLV MUST NOT be extended. If these conditions are not met, the behavior of
+     * this method is undefined.
+     *
+     * @tparam  SimpleTlvType   The simple TLV type to read (must be a sub-class of `SimpleTlvInfo`).
+     *
+     * @param[in] aValue   The new TLV value.
+     *
+     */
+    template <typename SimpleTlvType> void WriteValueAs(const typename SimpleTlvType::ValueType &aValue)
+    {
+        memcpy(this + 1, &aValue, sizeof(aValue));
+    }
+
+    /**
+     * Writes the value of TLV treating it as a given integer-value TLV type.
+     *
+     * This method requires the TLV to be already validated, in particular, its length MUST NOT be less than the
+     * required size of the value type. The TLV MUST NOT be extended. If these conditions are not met, the behavior of
+     * this method is undefined.
+     *
+     * @tparam  UintTlvType     The integer simple TLV type to read (must be a sub-class of `UintTlvInfo`).
+     *
+     * @param[in]  aValue   The new TLV value.
+     *
+     */
+    template <typename UintTlvType> void WriteValueAs(typename UintTlvType::UintValueType aValue)
+    {
+        return BigEndian::Write<typename UintTlvType::UintValueType>(aValue, reinterpret_cast<uint8_t *>(this + 1));
+    }
 
     //------------------------------------------------------------------------------------------------------------------
     // Static methods for reading/finding/appending TLVs in a `Message`.
@@ -464,6 +530,22 @@ public:
      *
      * On success this method grows the message by the size of the TLV.
      *
+     * @param[in]  aMessage      The message to append to.
+     * @param[in]  aType         The TLV type to append.
+     * @param[in]  aValue        A buffer containing the TLV value.
+     * @param[in]  aLength       The value length (in bytes).
+     *
+     * @retval kErrorNone     Successfully appended the TLV to the message.
+     * @retval kErrorNoBufs   Insufficient available buffers to grow the message.
+     *
+     */
+    static Error AppendTlv(Message &aMessage, uint8_t aType, const void *aValue, uint8_t aLength);
+
+    /**
+     * Appends a TLV with a given type and value to a message.
+     *
+     * On success this method grows the message by the size of the TLV.
+     *
      * @tparam     TlvType       The TLV type to append.
      *
      * @param[in]  aMessage      A reference to the message to append to.
@@ -621,7 +703,6 @@ private:
     };
 
     static Error FindTlv(const Message &aMessage, uint8_t aType, void *aValue, uint16_t aLength);
-    static Error AppendTlv(Message &aMessage, uint8_t aType, const void *aValue, uint8_t aLength);
     static Error ReadStringTlv(const Message &aMessage, uint16_t aOffset, uint8_t aMaxStringLength, char *aValue);
     static Error FindStringTlv(const Message &aMessage, uint8_t aType, uint8_t aMaxStringLength, char *aValue);
     static Error AppendStringTlv(Message &aMessage, uint8_t aType, uint8_t aMaxStringLength, const char *aValue);
@@ -641,7 +722,7 @@ public:
      * Returns the Length value.
      *
      */
-    uint16_t GetLength(void) const { return HostSwap16(mLength); }
+    uint16_t GetLength(void) const { return BigEndian::HostSwap16(mLength); }
 
     /**
      * Sets the Length value.
@@ -652,7 +733,7 @@ public:
     void SetLength(uint16_t aLength)
     {
         Tlv::SetLength(kExtendedLength);
-        mLength = HostSwap16(aLength);
+        mLength = BigEndian::HostSwap16(aLength);
     }
 
 private:
