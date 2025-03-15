@@ -97,11 +97,16 @@ verify(br2_local_onlink != br2_favored_onlink)
 
 verify(br1_favored_onlink == br2_favored_onlink)
 
-br1_routers = br1.br_get_routers()
-br2_routers = br2.br_get_routers()
+# Check that the two BRs discover and track each other (not as peer BR since
+# connected to different networks).
 
-verify(len(br1_routers) > 0)
-verify(len(br2_routers) > 0)
+for br in [br1, br1]:
+    routers = br.br_get_routers()
+    verify(len(routers) > 0)
+    for router in routers:
+        verify('reachable:yes' in router)
+        verify('S:1' in router)
+        verify(not router.endswith('(peer BR)'))
 
 # -----------------------------------------------------------------------------------------------------------------------
 # Test finished

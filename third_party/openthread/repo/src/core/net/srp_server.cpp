@@ -35,17 +35,7 @@
 
 #if OPENTHREAD_CONFIG_SRP_SERVER_ENABLE
 
-#include "common/as_core_type.hpp"
-#include "common/const_cast.hpp"
-#include "common/locator_getters.hpp"
-#include "common/log.hpp"
-#include "common/new.hpp"
-#include "common/num_utils.hpp"
-#include "common/random.hpp"
-#include "common/string.hpp"
 #include "instance/instance.hpp"
-#include "net/dns_types.hpp"
-#include "thread/thread_netif.hpp"
 
 namespace ot {
 namespace Srp {
@@ -86,7 +76,7 @@ static Dns::UpdateHeader::Response ErrorToDnsResponseCode(Error aError)
 
 Server::Server(Instance &aInstance)
     : InstanceLocator(aInstance)
-    , mSocket(aInstance)
+    , mSocket(aInstance, *this)
     , mLeaseTimer(aInstance)
     , mOutstandingUpdatesTimer(aInstance)
     , mCompletedUpdateTask(aInstance)
@@ -159,12 +149,12 @@ void Server::Enable(void)
     {
     case kAddressModeUnicast:
         SelectPort();
-        Get<NetworkData::Publisher>().PublishDnsSrpServiceUnicast(mPort);
+        Get<NetworkData::Publisher>().PublishDnsSrpServiceUnicast(mPort, kSrpVersion);
         break;
 
     case kAddressModeAnycast:
         mPort = kAnycastAddressModePort;
-        Get<NetworkData::Publisher>().PublishDnsSrpServiceAnycast(mAnycastSequenceNumber);
+        Get<NetworkData::Publisher>().PublishDnsSrpServiceAnycast(mAnycastSequenceNumber, kSrpVersion);
         break;
     }
 
@@ -668,8 +658,8 @@ Error Server::PrepareSocket(void)
 #endif
 
     VerifyOrExit(!mSocket.IsOpen());
-    SuccessOrExit(error = mSocket.Open(HandleUdpReceive, this));
-    error = mSocket.Bind(mPort, Ip6::kNetifThread);
+    SuccessOrExit(error = mSocket.Open(Ip6::kNetifThreadInternal));
+    error = mSocket.Bind(mPort);
 
 exit:
     if (error != kErrorNone)
@@ -788,8 +778,7 @@ const Server::UpdateMetadata *Server::FindOutstandingUpdate(const MessageMetadat
     for (const UpdateMetadata &update : mOutstandingUpdates)
     {
         if (aMessageMetadata.mDnsHeader.GetMessageId() == update.GetDnsHeader().GetMessageId() &&
-            aMessageMetadata.mMessageInfo->GetPeerAddr() == update.GetMessageInfo().GetPeerAddr() &&
-            aMessageMetadata.mMessageInfo->GetPeerPort() == update.GetMessageInfo().GetPeerPort())
+            aMessageMetadata.mMessageInfo->HasSamePeerAddrAndPort(update.GetMessageInfo()))
         {
             ExitNow(ret = &update);
         }
@@ -1561,11 +1550,6 @@ exit:
     FreeMessageOnError(response, error);
 }
 
-void Server::HandleUdpReceive(void *aContext, otMessage *aMessage, const otMessageInfo *aMessageInfo)
-{
-    static_cast<Server *>(aContext)->HandleUdpReceive(AsCoreType(aMessage), AsCoreType(aMessageInfo));
-}
-
 void Server::HandleUdpReceive(Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
 {
     Error error = ProcessMessage(aMessage, aMessageInfo);
@@ -1608,15 +1592,14 @@ exit:
 
 void Server::HandleLeaseTimer(void)
 {
-    TimeMilli now                = TimerMilli::GetNow();
-    TimeMilli earliestExpireTime = now.GetDistantFuture();
-    Host     *nextHost;
+    NextFireTime nextExpireTime;
+    Host        *nextHost;
 
     for (Host *host = mHosts.GetHead(); host != nullptr; host = nextHost)
     {
         nextHost = host->GetNext();
 
-        if (host->GetKeyExpireTime() <= now)
+        if (host->GetKeyExpireTime() <= nextExpireTime.GetNow())
         {
             LogInfo("KEY LEASE of host %s expired", host->GetFullName());
 
@@ -1629,7 +1612,7 @@ void Server::HandleLeaseTimer(void)
 
             Service *next;
 
-            earliestExpireTime = Min(earliestExpireTime, host->GetKeyExpireTime());
+            nextExpireTime.UpdateIfEarlier(host->GetKeyExpireTime());
 
             // Check if any service instance name expired.
             for (Service *service = host->mServices.GetHead(); service != nullptr; service = next)
@@ -1638,18 +1621,18 @@ void Server::HandleLeaseTimer(void)
 
                 OT_ASSERT(service->mIsDeleted);
 
-                if (service->GetKeyExpireTime() <= now)
+                if (service->GetKeyExpireTime() <= nextExpireTime.GetNow())
                 {
                     service->Log(Service::kKeyLeaseExpired);
                     host->RemoveService(service, kDeleteName, kNotifyServiceHandler);
                 }
                 else
                 {
-                    earliestExpireTime = Min(earliestExpireTime, service->GetKeyExpireTime());
+                    nextExpireTime.UpdateIfEarlier(service->GetKeyExpireTime());
                 }
             }
         }
-        else if (host->GetExpireTime() <= now)
+        else if (host->GetExpireTime() <= nextExpireTime.GetNow())
         {
             LogInfo("LEASE of host %s expired", host->GetFullName());
 
@@ -1662,7 +1645,7 @@ void Server::HandleLeaseTimer(void)
 
             RemoveHost(host, kRetainName);
 
-            earliestExpireTime = Min(earliestExpireTime, host->GetKeyExpireTime());
+            nextExpireTime.UpdateIfEarlier(host->GetKeyExpireTime());
         }
         else
         {
@@ -1672,13 +1655,13 @@ void Server::HandleLeaseTimer(void)
 
             OT_ASSERT(!host->IsDeleted());
 
-            earliestExpireTime = Min(earliestExpireTime, host->GetExpireTime());
+            nextExpireTime.UpdateIfEarlier(host->GetExpireTime());
 
             for (Service *service = host->mServices.GetHead(); service != nullptr; service = next)
             {
                 next = service->GetNext();
 
-                if (service->GetKeyExpireTime() <= now)
+                if (service->GetKeyExpireTime() <= nextExpireTime.GetNow())
                 {
                     service->Log(Service::kKeyLeaseExpired);
                     host->RemoveService(service, kDeleteName, kNotifyServiceHandler);
@@ -1686,38 +1669,25 @@ void Server::HandleLeaseTimer(void)
                 else if (service->mIsDeleted)
                 {
                     // The service has been deleted but the name retains.
-                    earliestExpireTime = Min(earliestExpireTime, service->GetKeyExpireTime());
+                    nextExpireTime.UpdateIfEarlier(service->GetKeyExpireTime());
                 }
-                else if (service->GetExpireTime() <= now)
+                else if (service->GetExpireTime() <= nextExpireTime.GetNow())
                 {
                     service->Log(Service::kLeaseExpired);
 
                     // The service is expired, delete it.
                     host->RemoveService(service, kRetainName, kNotifyServiceHandler);
-                    earliestExpireTime = Min(earliestExpireTime, service->GetKeyExpireTime());
+                    nextExpireTime.UpdateIfEarlier(service->GetKeyExpireTime());
                 }
                 else
                 {
-                    earliestExpireTime = Min(earliestExpireTime, service->GetExpireTime());
+                    nextExpireTime.UpdateIfEarlier(service->GetExpireTime());
                 }
             }
         }
     }
 
-    if (earliestExpireTime != now.GetDistantFuture())
-    {
-        OT_ASSERT(earliestExpireTime >= now);
-        if (!mLeaseTimer.IsRunning() || earliestExpireTime <= mLeaseTimer.GetFireTime())
-        {
-            LogInfo("Lease timer is scheduled for %lu seconds", ToUlong(Time::MsecToSec(earliestExpireTime - now)));
-            mLeaseTimer.StartAt(earliestExpireTime, 0);
-        }
-    }
-    else
-    {
-        LogInfo("Lease timer is stopped");
-        mLeaseTimer.Stop();
-    }
+    mLeaseTimer.FireAtIfEarlier(nextExpireTime);
 }
 
 void Server::HandleOutstandingUpdatesTimer(void)
@@ -1748,8 +1718,12 @@ const char *Server::AddressModeToString(AddressMode aMode)
         "anycast", // (1) kAddressModeAnycast
     };
 
-    static_assert(kAddressModeUnicast == 0, "kAddressModeUnicast value is incorrect");
-    static_assert(kAddressModeAnycast == 1, "kAddressModeAnycast value is incorrect");
+    struct EnumCheck
+    {
+        InitEnumValidatorCounter();
+        ValidateNextEnum(kAddressModeUnicast);
+        ValidateNextEnum(kAddressModeAnycast);
+    };
 
     return kAddressModeStrings[aMode];
 }
@@ -1802,7 +1776,7 @@ void Server::UpdateAddrResolverCacheTable(const Ip6::MessageInfo &aMessageInfo, 
 
     rloc16 = Get<AddressResolver>().LookUp(aMessageInfo.GetPeerAddr());
 
-    VerifyOrExit(rloc16 != Mac::kShortAddrInvalid);
+    VerifyOrExit(rloc16 != Mle::kInvalidRloc16);
 
     for (const Ip6::Address &address : aHost.mAddresses)
     {
@@ -1960,13 +1934,17 @@ void Server::Service::Log(Action aAction) const
         "KEY LEASE expired for",     // (6) kKeyLeaseExpired
     };
 
-    static_assert(0 == kAddNew, "kAddNew value is incorrect");
-    static_assert(1 == kUpdateExisting, "kUpdateExisting value is incorrect");
-    static_assert(2 == kKeepUnchanged, "kKeepUnchanged value is incorrect");
-    static_assert(3 == kRemoveButRetainName, "kRemoveButRetainName value is incorrect");
-    static_assert(4 == kFullyRemove, "kFullyRemove value is incorrect");
-    static_assert(5 == kLeaseExpired, "kLeaseExpired value is incorrect");
-    static_assert(6 == kKeyLeaseExpired, "kKeyLeaseExpired value is incorrect");
+    struct EnumCheck
+    {
+        InitEnumValidatorCounter();
+        ValidateNextEnum(kAddNew);
+        ValidateNextEnum(kUpdateExisting);
+        ValidateNextEnum(kKeepUnchanged);
+        ValidateNextEnum(kRemoveButRetainName);
+        ValidateNextEnum(kFullyRemove);
+        ValidateNextEnum(kLeaseExpired);
+        ValidateNextEnum(kKeyLeaseExpired);
+    };
 
     // We only log if the `Service` is marked as committed. This
     // ensures that temporary `Service` entries associated with a

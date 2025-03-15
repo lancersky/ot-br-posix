@@ -33,7 +33,7 @@ from collections import Counter
 from typing import Callable, List, Collection, Union, Tuple, Optional, Dict, Pattern, Any
 
 from . import connectors
-from .command_handlers import OTCommandHandler, OtCliCommandRunner, OtbrSshCommandRunner, OtbrAdbCommandRunner
+from .command_handlers import OTCommandHandler, OtCliCommandRunner, OtbrSshCommandRunner, OtbrAdbTcpCommandRunner, OtbrAdbUsbCommandRunner
 from .connectors import Simulator
 from .errors import UnexpectedCommandOutput, ExpectLineTimeoutError, CommandError, InvalidArgumentsError
 from .types import ChildId, Rloc16, Ip6Addr, ThreadState, PartitionId, DeviceMode, RouterId, SecurityPolicy, Ip6Prefix, \
@@ -135,6 +135,25 @@ class OTCI(object):
             return output
         else:
             raise CommandError(cmd, output)
+
+    def execute_platform_command(self, cmd: str, timeout: float = 10, silent: bool = False) -> List[str]:
+        """Execute the platform command.
+
+        :param cmd: The command to execute.
+        :param timeout: The command timeout.
+        :param silent: Whether to run the command silent without logging.
+        :returns: The command output as a list of lines.
+        """
+        if not silent:
+            self.log('info', '> %s', cmd)
+
+        output = self.__otcmd.execute_platform_command(cmd, timeout)
+
+        if not silent:
+            for line in output:
+                self.log('info', '%s', line)
+
+        return output
 
     def set_execute_command_retry(self, n: int):
         assert n >= 0
@@ -746,7 +765,16 @@ class OTCI(object):
 
             id = int(col("ID"))
             r, d, n = int(col("R")), int(col("D")), int(col("N"))
-            mode = DeviceMode(f'{"r" if r else ""}{"d" if d else ""}{"n" if n else ""}')
+
+            #
+            # Device mode flags:
+            #
+            # r: rx-on-when-idle
+            # d: Full Thread Device
+            # n: Full Network Data
+            # -: no flags set (rx-off-when-idle, minimal Thread device, stable network data)
+            mode = DeviceMode(
+                f'{"r" if r else ""}{"d" if d else ""}{"n" if n else ""}{"-" if r == d == n == 0 else ""}')
 
             child = {
                 'id': ChildId(id),
@@ -767,6 +795,9 @@ class OTCI(object):
 
             if 'QMsgCnt' in headers:
                 child['qmsgcnt'] = int(col('QMsgCnt'))
+
+            if 'Suprvsn' in headers:
+                child['suprvsn'] = int(col('Suprvsn'))
 
             table[ChildId(id)] = child
 
@@ -1731,6 +1762,7 @@ class OTCI(object):
         #
         # Active Timestamp: 1
         # Channel: 22
+        # Wake-up Channel: 11
         # Channel Mask: 0x07fff800
         # Ext PAN ID: 5c93ae980ff22d35
         # Mesh Local Prefix: fdc7:55fe:6363:bd01::/64
@@ -1750,6 +1782,8 @@ class OTCI(object):
                 dataset['active_timestamp'] = int(val)
             elif key == 'Channel':
                 dataset['channel'] = int(val)
+            elif key == 'Wake-up Channel':
+                dataset['wakeupchannel'] = int(val)
             elif key == 'Channel Mask':
                 dataset['channel_mask'] = int(val, 16)
             elif key == 'Ext PAN ID':
@@ -1790,9 +1824,15 @@ class OTCI(object):
 
         self.execute_command(cmd)
 
+    def get_dataset_tlvs_bytes(self) -> bytes:
+        """Gets bytes of the Operational Dataset TLVs"""
+        hexstr = self.__parse_str(self.execute_command('dataset tlvs'))
+        return self.__hex_to_bytes(hexstr)
+
     def dataset_set_buffer(self,
                            active_timestamp: Optional[int] = None,
                            channel: Optional[int] = None,
+                           wakeupchannel: Optional[int] = None,
                            channel_mask: Optional[int] = None,
                            extpanid: Optional[str] = None,
                            mesh_local_prefix: Optional[str] = None,
@@ -1807,6 +1847,9 @@ class OTCI(object):
 
         if channel is not None:
             self.execute_command(f'dataset channel {channel}')
+
+        if wakeupchannel is not None:
+            self.execute_command(f'dataset wakeupchannel {wakeupchannel}')
 
         if channel_mask is not None:
             self.execute_command(f'dataset channelmask {channel_mask}')
@@ -1945,18 +1988,6 @@ class OTCI(object):
     def has_ipmaddr(self, ip: Union[str, ipaddress.IPv6Address]):
         """Check if a IPv6 multicast address was subscribed by the Thread interface."""
         return ip in self.get_ipmaddrs()
-
-    def get_ipmaddr_promiscuous(self) -> bool:
-        """Get multicast promiscuous mode."""
-        return self.__parse_Enabled_or_Disabled(self.execute_command("ipmaddr promiscuous"))
-
-    def enable_ipmaddr_promiscuous(self):
-        """Enable multicast promiscuous mode."""
-        self.execute_command('ipmaddr promiscuous enable')
-
-    def disable_ipmaddr_promiscuous(self):
-        """Disable multicast promiscuous mode."""
-        self.execute_command('ipmaddr promiscuous disable')
 
     def get_ipmaddr_llatn(self) -> Ip6Addr:
         """Get Link Local All Thread Nodes Multicast Address"""
@@ -2124,13 +2155,136 @@ class OTCI(object):
     #
     # Link metrics management
     #
-    # TODO: linkmetrics mgmt <ipaddr> forward <seriesid> [ldraX][pqmr]
-    # TODO: linkmetrics probe <ipaddr> <seriesid> <length>
-    # TODO: linkmetrics query <ipaddr> single [pqmr]
-    # TODO: linkmetrics query <ipaddr> forward <seriesid>
-    # TODO: linkquality <extaddr>
-    # TODO: linkquality <extaddr> <linkquality>
-    #
+
+    def linkmetrics_config_enhanced_ack_clear(self, peer_addr: Union[str, Ip6Addr]) -> bool:
+        output = self.execute_command(f'linkmetrics config {peer_addr} enhanced-ack clear')
+        return self.__parse_linkmetrics_mgmt_response(peer_addr, output)
+
+    def linkmetrics_config_enhanced_ack_register(self,
+                                                 peer_addr: Union[str, Ip6Addr],
+                                                 link_metrics_flags: str,
+                                                 reference: bool = False) -> bool:
+        if self.__valid_flags(link_metrics_flags, 'qmr') is False:
+            raise ValueError(link_metrics_flags)
+
+        output = self.execute_command(
+            f'linkmetrics config {peer_addr} enhanced-ack register {link_metrics_flags} {"r" if reference else ""}')
+        return self.__parse_linkmetrics_mgmt_response(peer_addr, output)
+
+    def linkmetrics_config_forward(self, peer_addr: Union[str, Ip6Addr], seriesid: int, series_flags: str,
+                                   link_metrics_flags: str) -> bool:
+        if self.__valid_flags(series_flags, 'ldraX') is False:
+            raise ValueError(series_flags)
+
+        if self.__valid_flags(link_metrics_flags, 'pqmr') is False:
+            raise ValueError(link_metrics_flags)
+
+        output = self.execute_command(
+            f'linkmetrics config {peer_addr} forward {seriesid} {series_flags} {link_metrics_flags}')
+        return self.__parse_linkmetrics_mgmt_response(peer_addr, output)
+
+    def linkmetrics_probe(self, peer_addr: Union[str, Ip6Addr], seriesid: int, length: int):
+        if length < 0 or length > 64:
+            raise ValueError(length)
+
+        self.execute_command(f'linkmetrics probe {peer_addr} {seriesid} {length}')
+
+    def linkmetrics_request_single(self, peer_addr: Union[str, Ip6Addr], link_metrics_flags: str) -> Dict[str, int]:
+        if self.__valid_flags(link_metrics_flags, 'pqmr') is False:
+            raise ValueError(link_metrics_flags)
+
+        output = self.execute_command(f'linkmetrics request {peer_addr} single {link_metrics_flags}')
+        return self.__parse_linkmetrics_report(peer_addr, output)
+
+    def linkmetrics_request_forward(self, peer_addr: Union[str, Ip6Addr], seriesid: int) -> Dict[str, int]:
+        output = self.execute_command(f'linkmetrics request {peer_addr} forward {seriesid}')
+        return self.__parse_linkmetrics_report(peer_addr, output)
+
+    def __parse_linkmetrics_mgmt_response(self, peer_addr: Union[str, Ip6Addr], output: List[str]) -> bool:
+        #
+        # Example output:
+        #
+        # Received Link Metrics Management Response from: fe80:0:0:0:3092:f334:1455:1ad2
+        # Status: Success
+        # Done
+        #
+
+        status = ''
+        report_received = False
+        ret = False
+
+        for line in output:
+            if 'Received Link Metrics Management Response from' in line:
+                address = line.split(': ')[1].strip()
+                report_received = address == peer_addr
+            elif 'Status' in line:
+                status = line.split(':')[1].strip()
+
+        return report_received and status == 'Success'
+
+    def __parse_linkmetrics_report(self, peer_addr: Union[str, Ip6Addr], output: List[str]) -> Dict[str, int]:
+        #
+        # Example output:
+        #
+        # Received Link Metrics Report from: fe80:0:0:0:3092:f334:1455:1ad2
+        #
+        # - PDU Counter: 2 (Count/Summation)
+        # - LQI: 76 (Exponential Moving Average)
+        # - Margin: 82 (dB) (Exponential Moving Average)
+        # - RSSI: -18 (dBm) (Exponential Moving Average)
+        # Done
+        #
+
+        results = {}
+        report_received = False
+
+        for line in output:
+            if 'Received Link Metrics Report' in line:
+                address = line.split(': ')[1].strip()
+                report_received = address == peer_addr
+            elif 'Received Link Metrics data in Enh Ack from neighbor' in line:
+                # If the Enhanced-ACK Based Probing is enabled, the CLI will output the following
+                # link metrics info after executing the `linkmetrics request` command. This case is
+                # used to skip these Enhanced-ACK related link metrics info.
+                #
+                # Received Link Metrics data in Enh Ack from neighbor, short address:0x3400 , extended address:c6a24d6514cf9178
+                # - LQI: 224 (Exponential Moving Average)
+                # - Margin: 0 (dB) (Exponential Moving Average)
+                #
+                # Received Link Metrics Report from: fe80:0:0:0:3092:f334:1455:1ad2
+                #
+                # - PDU Counter: 2 (Count/Summation)
+                # - LQI: 76 (Exponential Moving Average)
+                # - Margin: 82 (dB) (Exponential Moving Average)
+                # - RSSI: -18 (dBm) (Exponential Moving Average)
+                # Done
+                #
+                report_received = False
+
+            if not report_received:
+                continue
+
+            if '- LQI' in line:
+                results['lqi'] = self.__parse_numbers(line)[0]
+            elif '- Margin' in line:
+                results['margin'] = self.__parse_numbers(line)[0]
+            elif '- RSSI' in line:
+                results['rssi'] = self.__parse_numbers(line)[0]
+            elif '- PDU Counter' in line:
+                results['pdu_counter'] = self.__parse_numbers(line)[0]
+
+        return results
+
+    def __parse_numbers(self, line: str) -> List[int]:
+        values = re.findall("\-?\d+", line)
+        return list(map(int, values))
+
+    def __valid_flags(self, flags: str, flags_set: str):
+        # check for duplicate chars
+        if len(flags) != len(set(flags)):
+            return False
+
+        return set(flags).issubset(set(flags_set))
 
     #
     # Logging
@@ -2357,6 +2511,367 @@ class OTCI(object):
     # TODO: CoAP Secure utilities
 
     #
+    # Diag Utilities
+    #
+    def diag_start(self):
+        """Start diagnostics mode."""
+        self.execute_command('diag start')
+
+    def diag_stop(self):
+        """Stop diagnostics mode."""
+        self.execute_command('diag stop')
+
+    def diag_set_channel(self, channel: int):
+        """Set the IEEE 802.15.4 Channel value for diagnostics module."""
+        self.execute_command(f'diag channel {channel}')
+
+    def diag_get_channel(self) -> int:
+        """Get the IEEE 802.15.4 Channel value for diagnostics module."""
+        line = self.__parse_str(self.execute_command('diag channel'))
+        return int(line)
+
+    def diag_set_power(self, power: int):
+        """Set the tx power value(dBm) for diagnostics module."""
+        self.execute_command(f'diag power {power}')
+
+    def diag_get_power(self) -> int:
+        """Get the tx power value(dBm) for diagnostics module."""
+        line = self.__parse_str(self.execute_command('diag power'))
+        return int(line)
+
+    def diag_cw_start(self):
+        """Start transmitting continuous carrier wave."""
+        self.execute_command('diag cw start')
+
+    def diag_cw_stop(self):
+        """Stop transmitting continuous carrier wave."""
+        self.execute_command('diag cw stop')
+
+    def diag_frame(self,
+                   frame: str,
+                   max_csma_backoffs: Optional[int] = None,
+                   csma_ca_enabled: Optional[bool] = None,
+                   rx_channel_after_tx_done: Optional[int] = None,
+                   tx_delay: Optional[int] = None,
+                   tx_power: Optional[int] = None,
+                   max_frame_retries: Optional[int] = None,
+                   is_security_processed: Optional[bool] = None,
+                   is_header_updated: Optional[bool] = None):
+        """Set the frame (hex encoded) to be used by `diag send` and `diag repeat`."""
+        command = f'diag frame '
+        command += self.__get_optional_int_argument('-b', max_csma_backoffs)
+        command += self.__get_optional_int_argument('-d', tx_delay)
+        command += self.__get_optional_int_argument('-C', rx_channel_after_tx_done)
+        command += self.__get_optional_int_argument('-p', tx_power)
+        command += self.__get_optional_int_argument('-r', max_frame_retries)
+        command += self.__get_optional_bool_argument('-c', csma_ca_enabled)
+        command += self.__get_optional_bool_argument('-s', is_security_processed)
+        command += self.__get_optional_bool_argument('-u', is_header_updated)
+        command += f'{frame}'
+
+        self.execute_command(command)
+
+    def diag_stream_start(self):
+        """Start transmitting a stream of characters."""
+        self.execute_command('diag stream start')
+
+    def diag_stream_stop(self):
+        """Stop transmitting a stream of characters."""
+        self.execute_command('diag stream stop')
+
+    def diag_send(self, packets: int, length: Optional[int] = None, is_async: bool = True):
+        """Transmit a fixed number of packets."""
+        command = 'diag send '
+        command += 'async ' if is_async else ''
+        command += f'{packets} '
+        command += f'{length}' if length is not None else ''
+
+        self.execute_command(command)
+
+    def diag_repeat(self, delay: int, length: Optional[int] = None):
+        """Transmit packets repeatedly with a fixed interval."""
+        if length is None:
+            command = f'diag repeat {delay}'
+        else:
+            command = f'diag repeat {delay} {length}'
+        self.execute_command(command)
+
+    def diag_repeat_stop(self):
+        """Stop repeated packet transmission."""
+        self.execute_command('diag repeat stop')
+
+    def diag_radio_sleep(self):
+        """Enter radio sleep mode."""
+        self.execute_command('diag radio sleep')
+
+    def diag_radio_enable(self):
+        """Enable the radio."""
+        self.execute_command('diag radio enable')
+
+    def diag_radio_disable(self):
+        """Disable the radio."""
+        self.execute_command('diag radio disable')
+
+    def diag_radio_receive(self):
+        """Set radio to receive mode."""
+        self.execute_command('diag radio receive')
+
+    def diag_radio_receive_number(self, number: int):
+        """Set radio to receive mode and receive specified number of packets."""
+        #
+        # The `diag radio receive <number> [lpr]` command example:
+        #
+        # > diag radio receive 5 lpr
+        # 0, rssi:-49, lqi:119, len:10, psdu:000102030405060771e
+        # 1, rssi:-51, lqi:112, len:10, psdu:000102030405060771e
+        # 2, rssi:-42, lqi:120, len:10, psdu:000102030405060771e
+        # 3, rssi:-54, lqi:111, len:10, psdu:000102030405060771e
+        # 4, rssi:-56, lqi:108, len:10, psdu:000102030405060771e
+        # Done
+        #
+
+        output = self.execute_command(f'diag radio receive {number} lpr')
+
+        if len(output) != number:
+            raise UnexpectedCommandOutput(output)
+
+        result = []
+
+        for line in output:
+            data = line.split(',')
+
+            if len(data) != 5:
+                raise UnexpectedCommandOutput(data)
+
+            result.append({
+                'rssi': int(data[1].split(":")[1]),
+                'lqi': int(data[2].split(":")[1]),
+                'len': int(data[3].split(":")[1]),
+                'psdu': data[4].split(":")[1],
+            })
+
+        return result
+
+    def diag_enable_radio_receive_filter(self):
+        """Enable the radio receive filter."""
+        self.execute_command('diag radio receive filter enable')
+
+    def diag_disable_radio_receive_filter(self):
+        """Disable the radio receive filter."""
+        self.execute_command('diag radio receive filter disable')
+
+    def diag_set_radio_receive_filter_dest_mac_address(self, dest_mac_address: str):
+        """Set the destination mac address of the radio receive filter."""
+        self.execute_command(f'diag radio receive filter {dest_mac_address}')
+
+    def diag_get_radio_state(self) -> str:
+        """Get the state of the radio."""
+        return self.__parse_str(self.execute_command('diag radio state'))
+
+    def diag_get_stats(self) -> Dict[str, int]:
+        """Get statistics during diagnostics mode."""
+        #
+        # The command 'diag stats' output example:
+        #
+        # > diag stats
+        # received packets: 10
+        # sent success packets: 10
+        # sent error cca packets: 0
+        # sent error abort packets: 0
+        # sent error others packets: 0
+        # first received packet: rssi=-65, lqi=101
+        # last received packet: rssi=-64, lqi=98
+        # Done
+        #
+        output = self.execute_command('diag stats')
+        if len(output) < 7:
+            raise UnexpectedCommandOutput(output)
+
+        result = {}
+
+        result['received_packets'] = int(output[0].split(":")[1])
+        result['sent_success_packets'] = int(output[1].split(":")[1])
+        result['sent_error_cca_packets'] = int(output[2].split(":")[1])
+        result['sent_error_abort_packets'] = int(output[3].split(":")[1])
+        result['sent_error_invalid_state_packets'] = int(output[4].split(":")[1])
+        result['sent_error_others_packets'] = int(output[5].split(":")[1])
+
+        values = re.findall("\-?\d+", output[6])
+        result['first_received_packet_rssi'] = int(values[0])
+        result['first_received_packet_lqi'] = int(values[1])
+
+        values = re.findall("\-?\d+", output[7])
+        result['last_received_packet_rssi'] = int(values[0])
+        result['last_received_packet_lqi'] = int(values[1])
+
+        return result
+
+    def diag_stats_clear(self):
+        """Clear statistics during diagnostics mode."""
+        self.execute_command('diag stats clear')
+
+    def diag_set_gpio_value(self, gpio: int, value: int):
+        """Set the gpio value."""
+        self.execute_command(f'diag gpio set {gpio} {value}')
+
+    def diag_get_gpio_value(self, gpio: int) -> int:
+        """Get the gpio value."""
+        return int(self.__parse_str(self.execute_command(f'diag gpio get {gpio}')))
+
+    def diag_set_gpio_mode(self, gpio: int, mode: str):
+        """Set the gpio mode."""
+        self.execute_command(f'diag gpio mode {gpio} {mode}')
+
+    def diag_get_gpio_mode(self, gpio: int) -> str:
+        """Get the gpio mode."""
+        return self.__parse_str(self.execute_command(f'diag gpio mode {gpio}'))
+
+    def diag_echo(self, message: str) -> str:
+        """RCP echoes the given message."""
+        return self.__parse_str(self.execute_command(f'diag echo {message}'))
+
+    def diag_echo_number(self, number: int) -> str:
+        """RCP echoes the given message."""
+        return self.__parse_str(self.execute_command(f'diag echo -n {number}'))
+
+    def diag_get_powersettings(self) -> List[Dict[str, Any]]:
+        """Get the currently used power settings table."""
+        #
+        # The command 'diag powersettings' output example:
+        #
+        # > diag powersettings
+        # | StartCh | EndCh | TargetPower | ActualPower | RawPowerSetting |
+        # +---------+-------+-------------+-------------+-----------------+
+        # |      11 |    14 |        1700 |        1000 |          223344 |
+        # |      15 |    24 |        2000 |        1900 |          112233 |
+        # |      25 |    25 |        1600 |        1000 |          223344 |
+        # |      26 |    26 |        1600 |        1500 |          334455 |
+        # Done
+        #
+        result = []
+        output = self.execute_command(f'diag powersettings')
+
+        if len(output) < 3:
+            raise UnexpectedCommandOutput(output)
+
+        if not output[-1].startswith('Done'):
+            raise UnexpectedCommandOutput(output)
+
+        for line in output[2:-1]:
+            data = line.split('|')
+
+            result.append({
+                'channel_start': int(data[1]),
+                'channel_end': int(data[2]),
+                'target_power': int(data[3]),
+                'actual_power': int(data[4]),
+                'raw_power_setting': self.__hex_to_bytes(data[5].lstrip().rstrip()),
+            })
+
+        return result
+
+    def diag_get_channel_powersettings(self, channel: int) -> Dict[str, Any]:
+        """Gets the currently used power settings for the given channel."""
+        #
+        # The command 'diag powersettings <channel>' output example:
+        #
+        # > diag powersettings 11
+        # TargetPower(0.01dBm): 1700
+        # ActualPower(0.01dBm): 1000
+        # RawPowerSetting: 223344
+        # Done
+        #
+        result = {}
+        output = self.execute_command(f'diag powersettings {channel}')
+
+        if len(output) != 4:
+            raise UnexpectedCommandOutput(output)
+
+        if not output[-1].startswith('Done'):
+            raise UnexpectedCommandOutput(output)
+
+        result['target_power'] = int(output[0].split(':')[1])
+        result['actual_power'] = int(output[1].split(':')[1])
+        result['raw_power_setting'] = self.__hex_to_bytes(output[2].split(':')[1].lstrip().rstrip())
+
+        return result
+
+    def diag_get_rawpowersetting(self) -> str:
+        """Get the raw power setting."""
+        return self.__parse_str(self.execute_command('diag rawpowersetting'))
+
+    def diag_set_rawpowersetting(self, rawpowersetting: str):
+        """Set the raw power setting."""
+        self.execute_command(f'diag rawpowersetting {rawpowersetting}')
+
+    def diag_enable_rawpowersetting(self):
+        """Enable the raw power setting."""
+        self.execute_command('diag rawpowersetting enable')
+
+    def diag_disable_rawpowersetting(self):
+        """Disable the raw power setting."""
+        self.execute_command('diag rawpowersetting disable')
+
+    def is_command_supported(self, command: str) -> bool:
+        """Check whether the the given command is supported by the device."""
+        output = self.__otcmd.execute_command(command, timeout=10)
+
+        if re.match("Error \d+: \w*", output[-1]):
+            return False
+
+        return True
+
+    #
+    # Network management utilities
+    #
+    def create_dataset(self,
+                       active_timestamp: Optional[int] = None,
+                       channel: Optional[int] = None,
+                       channel_mask: Optional[int] = None,
+                       extpanid: Optional[str] = None,
+                       mesh_local_prefix: Optional[str] = None,
+                       network_key: Optional[str] = None,
+                       network_name: Optional[str] = None,
+                       panid: Optional[int] = None,
+                       pskc: Optional[str] = None,
+                       security_policy: Optional[tuple] = None,
+                       pending_timestamp: Optional[int] = None,
+                       wakeup_channel: Optional[int] = None) -> bytes:
+        """Creates a new Operational Dataset with given parameters."""
+        self.dataset_clear_buffer()
+        self.dataset_init_buffer()
+        self.dataset_set_buffer(active_timestamp, channel, wakeup_channel, channel_mask, extpanid, mesh_local_prefix,
+                                network_key, network_name, panid, pskc, security_policy, pending_timestamp)
+        return self.get_dataset_tlvs_bytes()
+
+    def join(self, dataset: bytes) -> None:
+        """Joins to a Thread network with given Active Operational Dataset."""
+        self.set_dataset_bytes('active', dataset)
+        self.ifconfig_up()
+        self.thread_start()
+
+    def leave(self) -> None:
+        """Leaves from the Thread network."""
+        self.thread_stop()
+        self.ifconfig_down()
+
+    def wait_for(self, command: str, expect_line: Optional[Union[str, Pattern, Collection[Any]]], timeout: float = 60):
+        """Wait for the expected output by periodically executing the given command."""
+        success = False
+
+        while timeout > 0:
+            output = self.execute_command(command)
+            if any(match_line(line, expect_line) for line in output):
+                success = True
+                break
+
+            self.__otcmd.wait(1)
+            timeout -= 1
+
+        if not success:
+            raise ExpectLineTimeoutError(expect_line)
+
+    #
     # Other TODOs
     #
     # TODO: netstat
@@ -2365,6 +2880,145 @@ class OTCI(object):
     # TODO: parent
     # TODO: pskc [-p] <key>|<passphrase>
     #
+
+    #
+    # Platform Commands Utilities
+    #
+    def support_iperf3(self) -> bool:
+        """Check whether the platform supports iperf3."""
+        #
+        # Command example:
+        #
+        # $ command -v iperf3
+        # /usr/bin/iperf3
+        #
+        ret = False
+        output = self.execute_platform_command('command -v iperf3')
+        if len(output) > 0 and 'iperf3' in output[0]:
+            ret = True
+
+        return ret
+
+    def iperf3_client(self,
+                      host: Union[str, Ip6Addr],
+                      ipv6: bool = True,
+                      udp: bool = True,
+                      bind_address: Optional[Union[str, Ip6Addr]] = None,
+                      bitrate: int = 10000,
+                      interval: int = 10,
+                      transmit_time: int = 10,
+                      length: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
+        """Run iperf3 in client mode.
+
+        :param host: The host IPv6 address to send iperf3 traffic.
+        :param ipv6: True to use IPv6, False to use IPv4 (default IPv6).
+        :param udp: True to use UDP, False to use TCP (default UDP).
+        :param bind_address: The local address to be bound.
+        :param bitrate: The target bitrate in bits/sec (default 10000 bit/sec).
+        :param interval: Seconds between periodic throughput reports (default 10 sec).
+        :param transmit_time: Time in seconds to transmit for (default 10 secs)
+        :param length: Length of buffer to read or write (default None).
+        """
+        #
+        # Iperf3 client example:
+        #
+        # $ iperf3 -6 -c fdd6:f5cf:d32d:8d88:a98b:cf7c:2ed2:691a -u -b 90000 -i 20 -t 10 -l 1232 -f k
+        # Connecting to host fdd6:f5cf:d32d:8d88:a98b:cf7c:2ed2:691a, port 5201
+        # [  5] local fdd6:f5cf:d32d:8d88:0:ff:fe00:fc00 port 59495 connected to fdd6:f5cf:d32d:8d88:a98b:cf7c:2ed2:691a port 5201
+        # [ ID] Interval           Transfer     Bitrate         Total Datagrams
+        # [  5]   0.00-10.00  sec   111 KBytes  90.7 Kbits/sec  92
+        # - - - - - - - - - - - - - - - - - - - - - - - - -
+        # [ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams
+        # [  5]   0.00-10.00  sec   111 KBytes  90.7 Kbits/sec  0.000 ms  0/92 (0%)  sender
+        # [  5]   0.00-10.96  sec  99.9 KBytes  74.7 Kbits/sec  30.157 ms  9/92 (9.8%)  receiver
+        #
+        # iperf Done.
+        #
+
+        wait_time = 10
+        client_option = f'-c {host}'
+        version_option = "-6" if ipv6 else "-4"
+        udp_option = '-u' if udp else ''
+        bind_option = f'-B {bind_address}' if bind_address else ''
+        bitrate_option = f'-b {bitrate}'
+        interval_option = f'-i {interval}'
+        time_option = f'-t {transmit_time}'
+        length_option = f'-l {length}' if length else ''
+        format_option = '-f k'
+
+        cmd = f'iperf3 {version_option} {client_option} {udp_option} {bitrate_option} {interval_option} {time_option} {length_option} {format_option}'
+        output = self.execute_platform_command(cmd, timeout=transmit_time + wait_time)
+
+        results = {}
+        for line in output:
+            fields = line.split()
+            if len(fields) != 13:
+                continue
+
+            if fields[-1] == 'sender':
+                results['sender'] = self.__parse_iperf3_report(line)
+            elif fields[-1] == 'receiver':
+                results['receiver'] = self.__parse_iperf3_report(line)
+
+        return results
+
+    def iperf3_server(self,
+                      bind_address: Optional[Union[str, Ip6Addr]] = None,
+                      interval: int = 10,
+                      timeout: int = 60) -> Dict[str, Any]:
+        """Run iperf3 in server mode.
+
+        :param bind_address: The local address to be bound.
+        :param interval: Seconds between periodic throughput reports (default 10 sec).
+        :param timeout: Timeout in seconds to abort the program (default 60 secs)
+        """
+        #
+        # Iperf3 server example:
+        #
+        # $ iperf3 -s -1 -B fdd6:f5cf:d32d:8d88:a98b:cf7c:2ed2:691a -i 50 -f k
+        # -----------------------------------------------------------
+        # Server listening on 5201
+        # -----------------------------------------------------------
+        # Accepted connection from fdd6:f5cf:d32d:8d88:0:ff:fe00:fc00, port 44080
+        # [  5] local fdd6:f5cf:d32d:8d88:a98b:cf7c:2ed2:691a port 5201 connected to fdd6:f5cf:d32d:8d88:0:ff:fe00:fc00 port 59495
+        # [ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams
+        # [  5]   0.00-10.96  sec  99.9 KBytes  74.7 Kbits/sec  30.157 ms  9/92 (9.8%)
+        # - - - - - - - - - - - - - - - - - - - - - - - - -
+        # [ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams
+        # [  5]   0.00-10.96  sec  99.9 KBytes  74.7 Kbits/sec  30.157 ms  9/92 (9.8%)  receiver
+        #
+
+        bind_option = f'-B {bind_address}' if bind_address else ''
+        interval_option = f'-i {interval}'
+        format_option = '-f k'
+
+        cmd = f'iperf3 -s -1 {bind_option} {interval_option} {format_option}'
+        output = self.execute_platform_command(cmd, timeout)
+
+        results = {}
+        for line in output:
+            fields = line.split()
+            if len(fields) == 13 and fields[-1] == 'receiver':
+                results = self.__parse_iperf3_report(line)
+
+        return results
+
+    def __parse_iperf3_report(self, line: str) -> Dict[str, Any]:
+        results = {}
+        fields = line.split()
+        format_unit = 1000
+
+        if len(fields) == 13 and (fields[-1] == 'sender' or fields[-1] == 'receiver'):
+            results['id'] = int(fields[1].replace(']', ''))
+            results['interval_start'] = float(fields[2].split('-')[0])
+            results['interval_end'] = float(fields[2].split('-')[1])
+            results['transfer'] = int(float(fields[4]) * format_unit)
+            results['bitrate'] = int(float(fields[6]) * format_unit)
+            results['jitter'] = float(fields[8])
+            results['lossrate'] = float(fields[11].replace('(', '').replace(')', '').replace('%', '')) / 100
+            results['datagrams'] = fields[12]
+
+        return results
 
     #
     # Private methods
@@ -2491,6 +3145,12 @@ class OTCI(object):
 
         return ''.join('%02x' % b for b in txt_bin)
 
+    def __get_optional_int_argument(self, arg_name: str, arg_value: Optional[int] = None):
+        return arg_name + f' {arg_value} ' if arg_value is not None else ''
+
+    def __get_optional_bool_argument(self, arg_name: str, arg_value: Optional[bool] = None):
+        return arg_name + ' ' if arg_value is not None and arg_value else ''
+
 
 def connect_cli_sim(executable: str, nodeid: int, simulator: Optional[Simulator] = None) -> OTCI:
     cli_handler = connectors.OtCliSim(executable, nodeid, simulator=simulator)
@@ -2515,8 +3175,13 @@ def connect_otbr_ssh(host: str, port: int = 22, username='pi', password='raspber
     return OTCI(cmd_handler)
 
 
-def connect_otbr_adb(host: str, port: int = 5555):
-    cmd_handler = OtbrAdbCommandRunner(host, port)
+def connect_otbr_adb_tcp(host: str, port: int = 5555, adb_key: Optional[str] = None):
+    cmd_handler = OtbrAdbTcpCommandRunner(host, port, adb_key)
+    return OTCI(cmd_handler)
+
+
+def connect_otbr_adb_usb(serial: str, adb_key: Optional[str] = None):
+    cmd_handler = OtbrAdbUsbCommandRunner(serial, adb_key)
     return OTCI(cmd_handler)
 
 

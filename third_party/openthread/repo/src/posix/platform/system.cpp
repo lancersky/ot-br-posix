@@ -43,8 +43,10 @@
 #include <openthread/cli.h>
 #include <openthread/heap.h>
 #include <openthread/tasklet.h>
+#include <openthread/trel.h>
 #include <openthread/platform/alarm-milli.h>
 #include <openthread/platform/infra_if.h>
+#include <openthread/platform/logging.h>
 #include <openthread/platform/otns.h>
 #include <openthread/platform/radio.h>
 
@@ -56,12 +58,14 @@
 #include "posix/platform/mainloop.hpp"
 #include "posix/platform/mdns_socket.hpp"
 #include "posix/platform/radio_url.hpp"
+#include "posix/platform/spinel_driver_getter.hpp"
 #include "posix/platform/udp.hpp"
 
 otInstance *gInstance = nullptr;
 bool        gDryRun   = false;
 
-#if OPENTHREAD_CONFIG_PLATFORM_NETIF_ENABLE || OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
+CoprocessorType sCoprocessorType = OT_COPROCESSOR_UNKNOWN;
+
 static void processStateChange(otChangedFlags aFlags, void *aContext)
 {
     otInstance *instance = static_cast<otInstance *>(aContext);
@@ -76,23 +80,24 @@ static void processStateChange(otChangedFlags aFlags, void *aContext)
 #if OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
     ot::Posix::InfraNetif::Get().HandleBackboneStateChange(instance, aFlags);
 #endif
-}
-#endif
 
-static const char *get802154RadioUrl(otPlatformConfig *aPlatformConfig)
+    platformRadioHandleStateChange(instance, aFlags);
+}
+
+static const char *get802154RadioUrl(const otPlatformCoprocessorUrls &aUrls)
 {
     const char *radioUrl = nullptr;
 
-    for (uint8_t i = 0; i < aPlatformConfig->mRadioUrlNum; i++)
+    for (uint8_t i = 0; i < aUrls.mNum; i++)
     {
-        ot::Posix::RadioUrl url(aPlatformConfig->mRadioUrls[i]);
+        ot::Posix::RadioUrl url(aUrls.mUrls[i]);
 
         if (strcmp(url.GetProtocol(), "trel") == 0)
         {
             continue;
         }
 
-        radioUrl = aPlatformConfig->mRadioUrls[i];
+        radioUrl = aUrls.mUrls[i];
         break;
     }
 
@@ -105,13 +110,13 @@ static const char *getTrelRadioUrl(otPlatformConfig *aPlatformConfig)
 {
     const char *radioUrl = nullptr;
 
-    for (uint8_t i = 0; i < aPlatformConfig->mRadioUrlNum; i++)
+    for (uint8_t i = 0; i < aPlatformConfig->mCoprocessorUrls.mNum; i++)
     {
-        ot::Posix::RadioUrl url(aPlatformConfig->mRadioUrls[i]);
+        ot::Posix::RadioUrl url(aPlatformConfig->mCoprocessorUrls.mUrls[i]);
 
         if (strcmp(url.GetProtocol(), "trel") == 0)
         {
-            radioUrl = aPlatformConfig->mRadioUrls[i];
+            radioUrl = aPlatformConfig->mCoprocessorUrls.mUrls[i];
             break;
         }
     }
@@ -127,29 +132,14 @@ void otSysSetInfraNetif(const char *aInfraNetifName, int aIcmp6Socket)
 }
 #endif
 
-void platformInit(otPlatformConfig *aPlatformConfig)
+void platformInitRcpMode(otPlatformConfig *aPlatformConfig)
 {
-    CoprocessorType type;
+    platformRadioInit(get802154RadioUrl(aPlatformConfig->mCoprocessorUrls));
 
-#if OPENTHREAD_POSIX_CONFIG_BACKTRACE_ENABLE
-    platformBacktraceInit();
-#endif
-
-    platformAlarmInit(aPlatformConfig->mSpeedUpFactor, aPlatformConfig->mRealTimeSignal);
-
-    type = platformSpinelManagerInit(get802154RadioUrl(aPlatformConfig));
-    if (type != OT_COPROCESSOR_RCP)
-    {
-        printf("Only RCP is supported!\n");
-        exit(OT_EXIT_FAILURE);
-    }
-
-    platformRadioInit(get802154RadioUrl(aPlatformConfig));
-
-    // For Dry-Run option, only init the radio.
+    // For Dry-Run option, only init the co-processor.
     VerifyOrExit(!aPlatformConfig->mDryRun);
 
-#if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
+#if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE && !OPENTHREAD_POSIX_CONFIG_TREL_SELECT_INFRA_IF
     platformTrelInit(getTrelRadioUrl(aPlatformConfig));
 #endif
     platformRandomInit();
@@ -167,6 +157,9 @@ void platformInit(otPlatformConfig *aPlatformConfig)
 #if OPENTHREAD_CONFIG_PLATFORM_NETIF_ENABLE
     platformNetifInit(aPlatformConfig);
 #endif
+#if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
+    platformResolverInit();
+#endif
 
 #if OPENTHREAD_CONFIG_PLATFORM_UDP_ENABLE
 #if OPENTHREAD_CONFIG_PLATFORM_NETIF_ENABLE
@@ -175,9 +168,46 @@ void platformInit(otPlatformConfig *aPlatformConfig)
     ot::Posix::Udp::Get().Init(aPlatformConfig->mInterfaceName);
 #endif
 #endif
-
 exit:
     return;
+}
+
+void platformInitNcpMode(otPlatformConfig *aPlatformConfig)
+{
+    // Do nothing now.
+    OT_UNUSED_VARIABLE(aPlatformConfig);
+}
+
+void platformInit(otPlatformConfig *aPlatformConfig)
+{
+#if OPENTHREAD_POSIX_CONFIG_BACKTRACE_ENABLE
+    platformBacktraceInit();
+#endif
+
+    platformAlarmInit(aPlatformConfig->mSpeedUpFactor, aPlatformConfig->mRealTimeSignal);
+
+    if (sCoprocessorType == OT_COPROCESSOR_UNKNOWN)
+    {
+        sCoprocessorType = platformSpinelManagerInit(get802154RadioUrl(aPlatformConfig->mCoprocessorUrls));
+    }
+
+    switch (sCoprocessorType)
+    {
+    case OT_COPROCESSOR_RCP:
+        platformInitRcpMode(aPlatformConfig);
+        break;
+
+    case OT_COPROCESSOR_NCP:
+        platformInitNcpMode(aPlatformConfig);
+        break;
+
+    default:
+        otPlatLog(OT_LOG_LEVEL_CRIT, OT_LOG_REGION_PLATFORM, "Unknown type of the co-processor!\n");
+        exit(OT_EXIT_FAILURE);
+        break;
+    }
+
+    aPlatformConfig->mCoprocessorType = sCoprocessorType;
 }
 
 void platformSetUp(otPlatformConfig *aPlatformConfig)
@@ -219,13 +249,19 @@ void platformSetUp(otPlatformConfig *aPlatformConfig)
     ot::Posix::Daemon::Get().SetUp();
 #endif
 
-#if OPENTHREAD_CONFIG_PLATFORM_NETIF_ENABLE || OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
     SuccessOrDie(otSetStateChangedCallback(gInstance, processStateChange, gInstance));
-#endif
 
 exit:
     return;
 }
+
+CoprocessorType otSysInitCoprocessor(otPlatformCoprocessorUrls *aUrls)
+{
+    sCoprocessorType = platformSpinelManagerInit(get802154RadioUrl(*aUrls));
+    return sCoprocessorType;
+}
+
+otSpinelDriver *otSysGetSpinelDriver(void) { return &ot::Posix::GetSpinelDriver(); }
 
 otInstance *otSysInit(otPlatformConfig *aPlatformConfig)
 {
@@ -233,11 +269,14 @@ otInstance *otSysInit(otPlatformConfig *aPlatformConfig)
 
     platformInit(aPlatformConfig);
 
-    gDryRun   = aPlatformConfig->mDryRun;
-    gInstance = otInstanceInitSingle();
-    OT_ASSERT(gInstance != nullptr);
+    gDryRun = aPlatformConfig->mDryRun;
+    if (sCoprocessorType == OT_COPROCESSOR_RCP)
+    {
+        gInstance = otInstanceInitSingle();
+        OT_ASSERT(gInstance != nullptr);
 
-    platformSetUp(aPlatformConfig);
+        platformSetUp(aPlatformConfig);
+    }
 
     return gInstance;
 }
@@ -270,13 +309,14 @@ exit:
     return;
 }
 
-void platformDeinit(void)
+void platformDeinitRcpMode(void)
 {
 #if OPENTHREAD_POSIX_VIRTUAL_TIME
     virtualTimeDeinit();
 #endif
     platformRadioDeinit();
     platformSpinelManagerDeinit();
+    sCoprocessorType = OT_COPROCESSOR_UNKNOWN;
 
     // For Dry-Run option, only the radio is initialized.
     VerifyOrExit(!gDryRun);
@@ -287,7 +327,8 @@ void platformDeinit(void)
 #if OPENTHREAD_CONFIG_PLATFORM_NETIF_ENABLE
     platformNetifDeinit();
 #endif
-#if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
+#if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE && !OPENTHREAD_POSIX_CONFIG_TREL_SELECT_INFRA_IF
+    otPlatTrelDisable(/* aInstance */ nullptr);
     platformTrelDeinit();
 #endif
 
@@ -303,14 +344,26 @@ exit:
     return;
 }
 
+void platformDeinitNcpMode(void)
+{
+    platformSpinelManagerDeinit();
+    sCoprocessorType = OT_COPROCESSOR_UNKNOWN;
+}
+
 void otSysDeinit(void)
 {
-    OT_ASSERT(gInstance != nullptr);
-
-    platformTearDown();
-    otInstanceFinalize(gInstance);
-    gInstance = nullptr;
-    platformDeinit();
+    if (sCoprocessorType == OT_COPROCESSOR_RCP)
+    {
+        OT_ASSERT(gInstance != nullptr);
+        platformTearDown();
+        otInstanceFinalize(gInstance);
+        gInstance = nullptr;
+        platformDeinitRcpMode();
+    }
+    else if (sCoprocessorType == OT_COPROCESSOR_NCP)
+    {
+        platformDeinitNcpMode();
+    }
 }
 
 #if OPENTHREAD_POSIX_VIRTUAL_TIME
@@ -320,7 +373,6 @@ void otSysDeinit(void)
  * @param[in,out]  aContext  A reference to the mainloop context.
  *
  * @returns The value returned from select().
- *
  */
 static int trySelect(otSysMainloopContext &aContext)
 {
@@ -359,6 +411,9 @@ void otSysMainloopUpdate(otInstance *aInstance, otSysMainloopContext *aMainloop)
 #endif
 #if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
     platformTrelUpdateFdSet(aMainloop);
+#endif
+#if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
+    platformResolverUpdateFdSet(aMainloop);
 #endif
 
     if (otTaskletsArePending(aInstance))
@@ -427,6 +482,9 @@ void otSysMainloopProcess(otInstance *aInstance, const otSysMainloopContext *aMa
     platformAlarmProcess(aInstance);
 #if OPENTHREAD_CONFIG_PLATFORM_NETIF_ENABLE
     platformNetifProcess(aMainloop);
+#endif
+#if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
+    platformResolverProcess(aMainloop);
 #endif
 }
 

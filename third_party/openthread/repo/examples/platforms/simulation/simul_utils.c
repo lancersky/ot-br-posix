@@ -29,14 +29,29 @@
 #include "simul_utils.h"
 
 #include <errno.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <sys/time.h>
 
+#include "lib/platform/exit_code.h"
 #include "utils/code_utils.h"
+
+#define ExpectOrExitWithErrorMsg(aCondition, aErrorMsg)          \
+    do                                                           \
+    {                                                            \
+        if (!(aCondition))                                       \
+        {                                                        \
+            perror(aErrorMsg);                                   \
+            otLogWarnPlat("%s: %s", aErrorMsg, strerror(errno)); \
+            goto exit;                                           \
+        }                                                        \
+    } while (false)
 
 #define UTILS_SOCKET_LOCAL_HOST_ADDR "127.0.0.1"
 #define UTILS_SOCKET_GROUP_ADDR "224.0.0.116"
+#define UTILS_SOCKET_GROUP_ADDR6 "ff02::116"
 
-const char *gLocalHost = UTILS_SOCKET_LOCAL_HOST_ADDR;
+const char *gLocalInterface = UTILS_SOCKET_LOCAL_HOST_ADDR;
 
 void utilsAddFdToFdSet(int aFd, fd_set *aFdSet, int *aMaxFd)
 {
@@ -56,78 +71,303 @@ exit:
     return;
 }
 
-void utilsInitSocket(utilsSocket *aSocket, uint16_t aPortBase)
+static bool IsAddressLinkLocal(const struct in6_addr *aAddress)
+{
+    return ((aAddress->s6_addr[0] & 0xff) == 0xfe) && ((aAddress->s6_addr[1] & 0xc0) == 0x80);
+}
+
+static void InitRxSocket(utilsSocket *aSocket, const struct in_addr *aIp4Address, unsigned int aIfIndex)
+{
+    int fd;
+    int one = 1;
+    int rval;
+
+    fd = socket(aIp4Address ? AF_INET : AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    ExpectOrExitWithErrorMsg(fd != -1, "socket(RxFd)");
+
+    rval = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(RxFd, SO_REUSEADDR)");
+
+    rval = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+    ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(RxFd, SO_REUSEPORT)");
+
+    if (aIp4Address)
+    {
+        struct ip_mreqn     mreq;
+        struct sockaddr_in *sockaddr = &aSocket->mGroupAddr.mSockAddr4;
+
+        rval = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, aIp4Address, sizeof(*aIp4Address));
+        ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(RxFd, IP_MULTICAST_IF)");
+
+        memset(sockaddr, 0, sizeof(*sockaddr));
+        sockaddr->sin_family = AF_INET;
+        sockaddr->sin_port   = htons(aSocket->mPortBase);
+        ExpectOrExitWithErrorMsg(inet_pton(AF_INET, UTILS_SOCKET_GROUP_ADDR, &sockaddr->sin_addr),
+                                 "inet_pton(AF_INET)");
+
+        memset(&mreq, 0, sizeof(mreq));
+        mreq.imr_multiaddr = sockaddr->sin_addr;
+        mreq.imr_address   = *aIp4Address; // This address is used to identify the network interface
+
+        rval = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+        ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(RxFd, IP_ADD_MEMBERSHIP)");
+
+        rval = bind(fd, (struct sockaddr *)sockaddr, sizeof(*sockaddr));
+        ExpectOrExitWithErrorMsg(rval != -1, "bind(RxFd)");
+    }
+    else
+    {
+        struct ipv6_mreq     mreq;
+        struct sockaddr_in6 *sockaddr = &aSocket->mGroupAddr.mSockAddr6;
+
+        rval = setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_IF, &aIfIndex, sizeof(aIfIndex));
+        ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(RxFd, IPV6_MULTICAST_IF)");
+
+        memset(sockaddr, 0, sizeof(*sockaddr));
+        sockaddr->sin6_family   = AF_INET6;
+        sockaddr->sin6_port     = htons(aSocket->mPortBase);
+        sockaddr->sin6_scope_id = aIfIndex; // This specifies network interface for link local scope
+        ExpectOrExitWithErrorMsg(inet_pton(AF_INET6, UTILS_SOCKET_GROUP_ADDR6, &sockaddr->sin6_addr),
+                                 "inet_pton(AF_INET6)");
+
+        memset(&mreq, 0, sizeof(mreq));
+        mreq.ipv6mr_multiaddr = sockaddr->sin6_addr;
+        mreq.ipv6mr_interface = aIfIndex;
+
+        rval = setsockopt(fd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq, sizeof(mreq));
+        ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(RxFd, IPV6_JOIN_GROUP)");
+
+        rval = bind(fd, (struct sockaddr *)sockaddr, sizeof(*sockaddr));
+        ExpectOrExitWithErrorMsg(rval != -1, "bind(RxFd)");
+    }
+
+    aSocket->mRxFd = fd;
+
+exit:
+    if (aSocket->mRxFd == -1)
+    {
+        DieNow(OT_EXIT_FAILURE);
+    }
+}
+
+void InitTxSocketIp6(utilsSocket *aSocket, const struct in6_addr *aAddress, unsigned int aIfIndex)
+{
+    int                 fd;
+    int                 one = 1;
+    int                 rval;
+    struct sockaddr_in6 sockaddr;
+
+    fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    ExpectOrExitWithErrorMsg(fd != -1, "socket(TxFd)");
+
+    memset(&sockaddr, 0, sizeof(sockaddr));
+    sockaddr.sin6_family = AF_INET6;
+    sockaddr.sin6_addr   = *aAddress;
+    sockaddr.sin6_port   = htons(aSocket->mPort);
+    if (IsAddressLinkLocal(aAddress))
+    {
+        sockaddr.sin6_scope_id = aIfIndex;
+    }
+
+    rval = setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_IF, &aIfIndex, sizeof(aIfIndex));
+    ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(TxFd, IPV6_MULTICAST_IF)");
+
+    rval = setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &one, sizeof(one));
+    ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(TxFd, IPV6_MULTICAST_LOOP)");
+
+    rval = bind(fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+    ExpectOrExitWithErrorMsg(rval != -1, "bind(TxFd)");
+
+    aSocket->mTxFd = fd;
+
+exit:
+    if (aSocket->mTxFd == -1)
+    {
+        DieNow(OT_EXIT_FAILURE);
+    }
+}
+
+static void InitTxSocketIp4(utilsSocket *aSocket, const struct in_addr *aAddress)
 {
     int                fd;
     int                one = 1;
     int                rval;
     struct sockaddr_in sockaddr;
-    struct ip_mreqn    mreq;
-
-    aSocket->mInitialized = false;
-    aSocket->mPortBase    = aPortBase;
-    aSocket->mPort        = (uint16_t)(aSocket->mPortBase + gNodeId);
 
     //- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
     // Prepare `mTxFd`
 
     fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    otEXPECT_ACTION(fd != -1, perror("socket(TxFd)"));
+    ExpectOrExitWithErrorMsg(fd != -1, "socket(TxFd)");
 
     memset(&sockaddr, 0, sizeof(sockaddr));
-    sockaddr.sin_family      = AF_INET;
-    sockaddr.sin_port        = htons(aSocket->mPort);
-    sockaddr.sin_addr.s_addr = inet_addr(gLocalHost);
+    sockaddr.sin_family = AF_INET;
+    sockaddr.sin_port   = htons(aSocket->mPort);
+    sockaddr.sin_addr   = *aAddress;
 
     rval = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &sockaddr.sin_addr, sizeof(sockaddr.sin_addr));
-    otEXPECT_ACTION(rval != -1, perror("setsockopt(TxFd, IP_MULTICAST_IF)"));
+    ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(TxFd, IP_MULTICAST_IF)");
 
     rval = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &one, sizeof(one));
-    otEXPECT_ACTION(rval != -1, perror("setsockopt(TxFd, IP_MULTICAST_LOOP)"));
+    ExpectOrExitWithErrorMsg(rval != -1, "setsockopt(TxFd, IP_MULTICAST_LOOP)");
 
     rval = bind(fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
-    otEXPECT_ACTION(rval != -1, perror("bind(TxFd)"));
+    ExpectOrExitWithErrorMsg(rval != -1, "bind(TxFd)");
 
     aSocket->mTxFd = fd;
 
-    //- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-    // Prepare `mRxFd`
+exit:
+    if (aSocket->mTxFd == -1)
+    {
+        DieNow(OT_EXIT_FAILURE);
+    }
+}
 
-    fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    otEXPECT_ACTION(fd != -1, perror("socket(RxFd)"));
+static bool TryInitSocketIfname(utilsSocket *aSocket, const char *aLocalInterface)
+{
+    const struct in6_addr *addr6   = NULL;
+    const struct in6_addr *addr6ll = NULL;
+    const struct in_addr  *addr4   = NULL;
+    struct ifaddrs        *ifaddr  = NULL;
+    unsigned int           ifIndex = 0;
 
-    rval = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    otEXPECT_ACTION(rval != -1, perror("setsockopt(RxFd, SO_REUSEADDR)"));
+    otEXPECT((ifIndex = if_nametoindex(aLocalInterface)));
 
-    rval = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
-    otEXPECT_ACTION(rval != -1, perror("setsockopt(RxFd, SO_REUSEPORT)"));
+    if (getifaddrs(&ifaddr) == -1)
+    {
+        DieNow(OT_EXIT_ERROR_ERRNO);
+    }
 
-    memset(&mreq, 0, sizeof(mreq));
-    inet_pton(AF_INET, UTILS_SOCKET_GROUP_ADDR, &mreq.imr_multiaddr);
+    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
+    {
+        if (ifa->ifa_addr == NULL || strcmp(ifa->ifa_name, aLocalInterface) != 0)
+        {
+            continue;
+        }
 
-    mreq.imr_address.s_addr = inet_addr(gLocalHost);
+        if (ifa->ifa_addr->sa_family == AF_INET)
+        {
+            addr4 = &((const struct sockaddr_in *)ifa->ifa_addr)->sin_addr;
+        }
+        else if (ifa->ifa_addr->sa_family == AF_INET6)
+        {
+            addr6 = &((const struct sockaddr_in6 *)ifa->ifa_addr)->sin6_addr;
+            if (IsAddressLinkLocal(addr6))
+            {
+                addr6ll = addr6;
+            }
+        }
+    }
 
-    rval = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &mreq.imr_address, sizeof(mreq.imr_address));
-    otEXPECT_ACTION(rval != -1, perror("setsockopt(RxFd, IP_MULTICAST_IF)"));
+    // Prefer
+    //  1. IPv6 link local address
+    //  2. IPv4 addresses
+    //  3. IPv6 addresses
+    if (addr6ll)
+    {
+        InitTxSocketIp6(aSocket, addr6ll, ifIndex);
+        addr6 = addr6ll;
+    }
+    else if (addr4)
+    {
+        InitTxSocketIp4(aSocket, addr4);
+        addr6 = NULL;
+    }
+    else if (addr6)
+    {
+        InitTxSocketIp6(aSocket, addr6, ifIndex);
+    }
+    else
+    {
+        fprintf(stderr, "No sock address for TX socket!\n");
+        DieNow(OT_EXIT_FAILURE);
+    }
 
-    rval = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
-    otEXPECT_ACTION(rval != -1, perror("setsockopt(RxFd, IP_ADD_MEMBERSHIP)"));
-
-    sockaddr.sin_family      = AF_INET;
-    sockaddr.sin_port        = htons(aSocket->mPortBase);
-    sockaddr.sin_addr.s_addr = inet_addr(UTILS_SOCKET_GROUP_ADDR);
-
-    rval = bind(fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
-    otEXPECT_ACTION(rval != -1, perror("bind(RxFd)"));
-
-    aSocket->mRxFd = fd;
-
+    InitRxSocket(aSocket, (addr6 ? NULL : addr4), ifIndex);
     aSocket->mInitialized = true;
+    aSocket->mUseIp6      = (addr6 != NULL);
 
 exit:
-    if (!aSocket->mInitialized)
+    freeifaddrs(ifaddr);
+    return aSocket->mInitialized;
+}
+
+static bool TryInitSocketIp4(utilsSocket *aSocket, const char *aLocalInterface)
+{
+    struct in_addr addr4;
+
+    ExpectOrExitWithErrorMsg(inet_pton(AF_INET, aLocalInterface, &addr4), "inet_pton(AF_INET)");
+
+    InitTxSocketIp4(aSocket, &addr4);
+    InitRxSocket(aSocket, &addr4, 0);
+    aSocket->mInitialized = true;
+    aSocket->mUseIp6      = false;
+
+exit:
+    return aSocket->mInitialized;
+}
+
+static bool TryInitSocketIp6(utilsSocket *aSocket, const char *aLocalInterface)
+{
+    struct in6_addr addr6;
+    struct ifaddrs *ifaddr = NULL;
+
+    ExpectOrExitWithErrorMsg(inet_pton(AF_INET6, aLocalInterface, &addr6), "inet_pton(AF_INET6)");
+
+    if (getifaddrs(&ifaddr) == -1)
     {
-        exit(EXIT_FAILURE);
+        perror("getifaddrs");
+        DieNow(OT_EXIT_ERROR_ERRNO);
+    }
+
+    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
+    {
+        const struct sockaddr_in6 *sockaddr6;
+        unsigned int               ifIndex;
+
+        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6)
+        {
+            continue;
+        }
+
+        sockaddr6 = (const struct sockaddr_in6 *)ifa->ifa_addr;
+        if (memcmp(&sockaddr6->sin6_addr, &addr6, sizeof(addr6)))
+        {
+            continue;
+        }
+
+        ifIndex = if_nametoindex(ifa->ifa_name);
+        if (ifIndex == 0)
+        {
+            perror("if_nametoindex");
+            DieNow(OT_EXIT_ERROR_ERRNO);
+        }
+
+        InitTxSocketIp6(aSocket, &addr6, ifIndex);
+        InitRxSocket(aSocket, NULL, ifIndex);
+        aSocket->mInitialized = true;
+        aSocket->mUseIp6      = true;
+        break;
+    }
+
+exit:
+    freeifaddrs(ifaddr);
+    return aSocket->mInitialized;
+}
+
+void utilsInitSocket(utilsSocket *aSocket, uint16_t aPortBase)
+{
+    aSocket->mInitialized = false;
+    aSocket->mPortBase    = aPortBase;
+    aSocket->mTxFd        = -1;
+    aSocket->mRxFd        = -1;
+    aSocket->mPort        = (uint16_t)(aSocket->mPortBase + gNodeId);
+
+    if (!TryInitSocketIfname(aSocket, gLocalInterface) && !TryInitSocketIp4(aSocket, gLocalInterface) &&
+        !TryInitSocketIp6(aSocket, gLocalInterface))
+    {
+        fprintf(stderr, "Failed to simulate node %d on %s\n", gNodeId, gLocalInterface);
+        DieNow(OT_EXIT_FAILURE);
     }
 }
 
@@ -174,10 +414,14 @@ uint16_t utilsReceiveFromSocket(const utilsSocket *aSocket,
                                 uint16_t           aBufferSize,
                                 uint16_t          *aSenderNodeId)
 {
-    struct sockaddr_in sockaddr;
-    socklen_t          socklen = sizeof(sockaddr);
-    ssize_t            rval;
-    uint16_t           len = 0;
+    ssize_t  rval;
+    uint16_t len = 0;
+    union
+    {
+        struct sockaddr_in  sockaddr4;
+        struct sockaddr_in6 sockaddr6;
+    } sockaddr;
+    socklen_t socklen = aSocket->mUseIp6 ? sizeof(sockaddr.sockaddr6) : sizeof(sockaddr.sockaddr4);
 
     memset(&sockaddr, 0, sizeof(sockaddr));
 
@@ -185,7 +429,7 @@ uint16_t utilsReceiveFromSocket(const utilsSocket *aSocket,
 
     if (rval > 0)
     {
-        uint16_t senderPort = ntohs(sockaddr.sin_port);
+        uint16_t senderPort = ntohs(aSocket->mUseIp6 ? sockaddr.sockaddr6.sin6_port : sockaddr.sockaddr4.sin_port);
 
         if (aSenderNodeId != NULL)
         {
@@ -201,7 +445,7 @@ uint16_t utilsReceiveFromSocket(const utilsSocket *aSocket,
     else if (errno != EINTR && errno != EAGAIN)
     {
         perror("recvfrom(RxFd)");
-        exit(EXIT_FAILURE);
+        DieNow(OT_EXIT_ERROR_ERRNO);
     }
 
     return len;
@@ -209,20 +453,15 @@ uint16_t utilsReceiveFromSocket(const utilsSocket *aSocket,
 
 void utilsSendOverSocket(const utilsSocket *aSocket, const void *aBuffer, uint16_t aBufferLength)
 {
-    ssize_t            rval;
-    struct sockaddr_in sockaddr;
-
-    memset(&sockaddr, 0, sizeof(sockaddr));
-    sockaddr.sin_family = AF_INET;
-    sockaddr.sin_port   = htons(aSocket->mPortBase);
-    inet_pton(AF_INET, UTILS_SOCKET_GROUP_ADDR, &sockaddr.sin_addr);
+    ssize_t rval;
 
     rval =
-        sendto(aSocket->mTxFd, (const char *)aBuffer, aBufferLength, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+        sendto(aSocket->mTxFd, (const char *)aBuffer, aBufferLength, 0, (const struct sockaddr *)&aSocket->mGroupAddr,
+               (aSocket->mUseIp6 ? sizeof(aSocket->mGroupAddr.mSockAddr6) : sizeof(aSocket->mGroupAddr.mSockAddr4)));
 
     if (rval < 0)
     {
         perror("sendto(sTxFd)");
-        exit(EXIT_FAILURE);
+        DieNow(OT_EXIT_ERROR_ERRNO);
     }
 }

@@ -29,12 +29,8 @@
 #ifndef SPINEL_LOGGER_HPP_
 #define SPINEL_LOGGER_HPP_
 
-#include "openthread-core-config.h"
-
 #include <openthread/error.h>
 #include <openthread/platform/toolchain.h>
-
-#include "ncp/ncp_config.h"
 
 namespace ot {
 namespace Spinel {

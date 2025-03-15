@@ -33,12 +33,7 @@
 
 #include "openthread-core-config.h"
 
-#include <openthread/dataset.h>
-
-#include "common/as_core_type.hpp"
-#include "common/locator_getters.hpp"
-#include "meshcop/dataset_manager.hpp"
-#include "meshcop/meshcop.hpp"
+#include "instance/instance.hpp"
 
 using namespace ot;
 
@@ -61,14 +56,16 @@ otError otDatasetGetActiveTlvs(otInstance *aInstance, otOperationalDatasetTlvs *
 
 otError otDatasetSetActive(otInstance *aInstance, const otOperationalDataset *aDataset)
 {
-    return AsCoreType(aInstance).Get<MeshCoP::ActiveDatasetManager>().Save(AsCoreType(aDataset));
+    AsCoreType(aInstance).Get<MeshCoP::ActiveDatasetManager>().SaveLocal(AsCoreType(aDataset));
+
+    return OT_ERROR_NONE;
 }
 
 otError otDatasetSetActiveTlvs(otInstance *aInstance, const otOperationalDatasetTlvs *aDataset)
 {
     AssertPointerIsNotNull(aDataset);
 
-    return AsCoreType(aInstance).Get<MeshCoP::ActiveDatasetManager>().Save(*aDataset);
+    return AsCoreType(aInstance).Get<MeshCoP::ActiveDatasetManager>().SaveLocal(*aDataset);
 }
 
 otError otDatasetGetPending(otInstance *aInstance, otOperationalDataset *aDataset)
@@ -85,14 +82,16 @@ otError otDatasetGetPendingTlvs(otInstance *aInstance, otOperationalDatasetTlvs 
 
 otError otDatasetSetPending(otInstance *aInstance, const otOperationalDataset *aDataset)
 {
-    return AsCoreType(aInstance).Get<MeshCoP::PendingDatasetManager>().Save(AsCoreType(aDataset));
+    AsCoreType(aInstance).Get<MeshCoP::PendingDatasetManager>().SaveLocal(AsCoreType(aDataset));
+
+    return OT_ERROR_NONE;
 }
 
 otError otDatasetSetPendingTlvs(otInstance *aInstance, const otOperationalDatasetTlvs *aDataset)
 {
     AssertPointerIsNotNull(aDataset);
 
-    return AsCoreType(aInstance).Get<MeshCoP::PendingDatasetManager>().Save(*aDataset);
+    return AsCoreType(aInstance).Get<MeshCoP::PendingDatasetManager>().SaveLocal(*aDataset);
 }
 
 otError otDatasetSendMgmtActiveGet(otInstance                           *aInstance,

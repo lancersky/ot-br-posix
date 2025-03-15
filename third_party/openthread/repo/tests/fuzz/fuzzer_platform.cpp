@@ -35,14 +35,17 @@
 #include <openthread/platform/alarm-micro.h>
 #include <openthread/platform/alarm-milli.h>
 #include <openthread/platform/diag.h>
+#include <openthread/platform/dnssd.h>
 #include <openthread/platform/entropy.h>
 #include <openthread/platform/logging.h>
+#include <openthread/platform/mdns_socket.h>
 #include <openthread/platform/misc.h>
 #include <openthread/platform/multipan.h>
 #include <openthread/platform/radio.h>
 #include <openthread/platform/settings.h>
 
 #include "mac/mac_frame.hpp"
+#include "openthread/error.h"
 
 using namespace ot;
 
@@ -75,9 +78,21 @@ bool otMacFrameIsAckRequested(const otRadioFrame *aFrame)
     return static_cast<const Mac::Frame *>(aFrame)->GetAckRequest();
 }
 
-uint8_t otMacFrameGetSequence(const otRadioFrame *aFrame)
+otError otMacFrameGetSequence(const otRadioFrame *aFrame, uint8_t *aSequence)
 {
-    return static_cast<const Mac::Frame *>(aFrame)->GetSequence();
+    otError error;
+
+    if (static_cast<const Mac::Frame *>(aFrame)->IsSequencePresent())
+    {
+        *aSequence = static_cast<const Mac::Frame *>(aFrame)->GetSequence();
+        error      = kErrorNone;
+    }
+    else
+    {
+        error = kErrorParse;
+    }
+
+    return error;
 }
 
 void FuzzerPlatformInit(void)
@@ -99,13 +114,22 @@ void FuzzerPlatformProcess(otInstance *aInstance)
 
         if (otMacFrameIsAckRequested(&sRadioTransmitFrame))
         {
+            otError error;
+
             sRadioAckFrame.mLength  = IEEE802154_ACK_LENGTH;
             sRadioAckFrame.mPsdu[0] = IEEE802154_FRAME_TYPE_ACK;
             sRadioAckFrame.mPsdu[1] = 0;
-            sRadioAckFrame.mPsdu[2] = otMacFrameGetSequence(&sRadioTransmitFrame);
             sRadioAckFrame.mChannel = sRadioTransmitFrame.mChannel;
+            error                   = otMacFrameGetSequence(&sRadioTransmitFrame, &sRadioAckFrame.mPsdu[2]);
 
-            otPlatRadioTxDone(aInstance, &sRadioTransmitFrame, &sRadioAckFrame, OT_ERROR_NONE);
+            if (error == OT_ERROR_NONE)
+            {
+                otPlatRadioTxDone(aInstance, &sRadioTransmitFrame, &sRadioAckFrame, OT_ERROR_NONE);
+            }
+            else
+            {
+                otPlatRadioTxDone(aInstance, &sRadioTransmitFrame, nullptr, OT_ERROR_NO_ACK);
+            }
         }
         else
         {
@@ -146,6 +170,8 @@ void FuzzerPlatformProcess(otInstance *aInstance)
 }
 
 bool FuzzerPlatformResetWasRequested(void) { return sResetWasRequested; }
+
+extern "C" {
 
 uint32_t otPlatAlarmMilliGetNow(void) { return sAlarmNow / 1000; }
 
@@ -484,17 +510,18 @@ otError otPlatSettingsDelete(otInstance *aInstance, uint16_t aKey, int aIndex)
 
 void otPlatSettingsWipe(otInstance *aInstance) { OT_UNUSED_VARIABLE(aInstance); }
 
-otError otPlatDiagProcess(otInstance *aInstance,
-                          uint8_t     aArgsLength,
-                          char       *aArgs[],
-                          char       *aOutput,
-                          size_t      aOutputMaxLen)
+void otPlatDiagSetOutputCallback(otInstance *aInstance, otPlatDiagOutputCallback aCallback, void *aContext)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aCallback);
+    OT_UNUSED_VARIABLE(aContext);
+}
+
+otError otPlatDiagProcess(otInstance *aInstance, uint8_t aArgsLength, char *aArgs[])
 {
     OT_UNUSED_VARIABLE(aInstance);
     OT_UNUSED_VARIABLE(aArgsLength);
     OT_UNUSED_VARIABLE(aArgs);
-    OT_UNUSED_VARIABLE(aOutput);
-    OT_UNUSED_VARIABLE(aOutputMaxLen);
 
     return OT_ERROR_INVALID_COMMAND;
 }
@@ -515,3 +542,129 @@ void otPlatDiagRadioReceived(otInstance *aInstance, otRadioFrame *aFrame, otErro
 }
 
 void otPlatDiagAlarmCallback(otInstance *aInstance) { OT_UNUSED_VARIABLE(aInstance); }
+
+otPlatDnssdState otPlatDnssdGetState(otInstance *aInstance)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+
+    return OT_PLAT_DNSSD_STOPPED;
+}
+
+void otPlatDnssdRegisterService(otInstance                 *aInstance,
+                                const otPlatDnssdService   *aService,
+                                otPlatDnssdRequestId        aRequestId,
+                                otPlatDnssdRegisterCallback aCallback)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aService);
+    OT_UNUSED_VARIABLE(aRequestId);
+    OT_UNUSED_VARIABLE(aCallback);
+}
+
+void otPlatDnssdUnregisterService(otInstance                 *aInstance,
+                                  const otPlatDnssdService   *aService,
+                                  otPlatDnssdRequestId        aRequestId,
+                                  otPlatDnssdRegisterCallback aCallback)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aService);
+    OT_UNUSED_VARIABLE(aRequestId);
+    OT_UNUSED_VARIABLE(aCallback);
+}
+
+void otPlatDnssdRegisterHost(otInstance                 *aInstance,
+                             const otPlatDnssdHost      *aHost,
+                             otPlatDnssdRequestId        aRequestId,
+                             otPlatDnssdRegisterCallback aCallback)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aHost);
+    OT_UNUSED_VARIABLE(aRequestId);
+    OT_UNUSED_VARIABLE(aCallback);
+}
+
+void otPlatDnssdUnregisterHost(otInstance                 *aInstance,
+                               const otPlatDnssdHost      *aHost,
+                               otPlatDnssdRequestId        aRequestId,
+                               otPlatDnssdRegisterCallback aCallback)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aHost);
+    OT_UNUSED_VARIABLE(aRequestId);
+    OT_UNUSED_VARIABLE(aCallback);
+}
+
+void otPlatDnssdRegisterKey(otInstance                 *aInstance,
+                            const otPlatDnssdKey       *aKey,
+                            otPlatDnssdRequestId        aRequestId,
+                            otPlatDnssdRegisterCallback aCallback)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aKey);
+    OT_UNUSED_VARIABLE(aRequestId);
+    OT_UNUSED_VARIABLE(aCallback);
+}
+
+void otPlatDnssdUnregisterKey(otInstance                 *aInstance,
+                              const otPlatDnssdKey       *aKey,
+                              otPlatDnssdRequestId        aRequestId,
+                              otPlatDnssdRegisterCallback aCallback)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aKey);
+    OT_UNUSED_VARIABLE(aRequestId);
+    OT_UNUSED_VARIABLE(aCallback);
+}
+
+otError otPlatMdnsSetListeningEnabled(otInstance *aInstance, bool aEnable, uint32_t aInfraIfIndex)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aEnable);
+    OT_UNUSED_VARIABLE(aInfraIfIndex);
+
+    return OT_ERROR_NOT_IMPLEMENTED;
+}
+
+void otPlatMdnsSendMulticast(otInstance *aInstance, otMessage *aMessage, uint32_t aInfraIfIndex)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aMessage);
+    OT_UNUSED_VARIABLE(aInfraIfIndex);
+}
+
+void otPlatMdnsSendUnicast(otInstance *aInstance, otMessage *aMessage, const otPlatMdnsAddressInfo *aAddress)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aMessage);
+    OT_UNUSED_VARIABLE(aAddress);
+}
+
+bool otPlatInfraIfHasAddress(uint32_t aInfraIfIndex, const otIp6Address *aAddress)
+{
+    OT_UNUSED_VARIABLE(aInfraIfIndex);
+    OT_UNUSED_VARIABLE(aAddress);
+
+    return false;
+}
+
+otError otPlatInfraIfSendIcmp6Nd(uint32_t            aInfraIfIndex,
+                                 const otIp6Address *aDestAddress,
+                                 const uint8_t      *aBuffer,
+                                 uint16_t            aBufferLength)
+{
+    OT_UNUSED_VARIABLE(aInfraIfIndex);
+    OT_UNUSED_VARIABLE(aDestAddress);
+    OT_UNUSED_VARIABLE(aBuffer);
+    OT_UNUSED_VARIABLE(aBufferLength);
+
+    return OT_ERROR_FAILED;
+}
+
+otError otPlatInfraIfDiscoverNat64Prefix(uint32_t aInfraIfIndex)
+{
+    OT_UNUSED_VARIABLE(aInfraIfIndex);
+
+    return OT_ERROR_FAILED;
+}
+
+} // extern "C"

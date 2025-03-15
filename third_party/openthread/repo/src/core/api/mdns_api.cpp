@@ -33,14 +33,11 @@
 
 #include "openthread-core-config.h"
 
-#include <openthread/mdns.h>
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE && OPENTHREAD_CONFIG_MULTICAST_DNS_PUBLIC_API_ENABLE
 
 #include "instance/instance.hpp"
-#include "net/mdns.hpp"
 
 using namespace ot;
-
-#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE && OPENTHREAD_CONFIG_MULTICAST_DNS_PUBLIC_API_ENABLE
 
 otError otMdnsSetEnabled(otInstance *aInstance, bool aEnable, uint32_t aInfraIfIndex)
 {
@@ -115,6 +112,8 @@ otError otMdnsUnregisterKey(otInstance *aInstance, const otMdnsKey *aKey)
     return AsCoreType(aInstance).Get<Dns::Multicast::Core>().UnregisterKey(*aKey);
 }
 
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
+
 otMdnsIterator *otMdnsAllocateIterator(otInstance *aInstance)
 {
     return AsCoreType(aInstance).Get<Dns::Multicast::Core>().AllocateIterator();
@@ -156,6 +155,8 @@ otError otMdnsGetNextKey(otInstance *aInstance, otMdnsIterator *aIterator, otMdn
 
     return AsCoreType(aInstance).Get<Dns::Multicast::Core>().GetNextKey(*aIterator, *aKey, *aState);
 }
+
+#endif // OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
 
 otError otMdnsStartBrowser(otInstance *aInstance, const otMdnsBrowser *aBroswer)
 {
@@ -226,5 +227,69 @@ otError otMdnsStopIp4AddressResolver(otInstance *aInstance, const otMdnsAddressR
 
     return AsCoreType(aInstance).Get<Dns::Multicast::Core>().StopIp4AddressResolver(*aResolver);
 }
+
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
+
+otError otMdnsGetNextBrowser(otInstance      *aInstance,
+                             otMdnsIterator  *aIterator,
+                             otMdnsBrowser   *aBrowser,
+                             otMdnsCacheInfo *aInfo)
+{
+    AssertPointerIsNotNull(aIterator);
+    AssertPointerIsNotNull(aBrowser);
+    AssertPointerIsNotNull(aInfo);
+
+    return AsCoreType(aInstance).Get<Dns::Multicast::Core>().GetNextBrowser(*aIterator, *aBrowser, *aInfo);
+}
+
+otError otMdnsGetNextSrvResolver(otInstance        *aInstance,
+                                 otMdnsIterator    *aIterator,
+                                 otMdnsSrvResolver *aResolver,
+                                 otMdnsCacheInfo   *aInfo)
+{
+    AssertPointerIsNotNull(aIterator);
+    AssertPointerIsNotNull(aResolver);
+    AssertPointerIsNotNull(aInfo);
+
+    return AsCoreType(aInstance).Get<Dns::Multicast::Core>().GetNextSrvResolver(*aIterator, *aResolver, *aInfo);
+}
+
+otError otMdnsGetNextTxtResolver(otInstance        *aInstance,
+                                 otMdnsIterator    *aIterator,
+                                 otMdnsTxtResolver *aResolver,
+                                 otMdnsCacheInfo   *aInfo)
+{
+    AssertPointerIsNotNull(aIterator);
+    AssertPointerIsNotNull(aResolver);
+    AssertPointerIsNotNull(aInfo);
+
+    return AsCoreType(aInstance).Get<Dns::Multicast::Core>().GetNextTxtResolver(*aIterator, *aResolver, *aInfo);
+}
+
+otError otMdnsGetNextIp6AddressResolver(otInstance            *aInstance,
+                                        otMdnsIterator        *aIterator,
+                                        otMdnsAddressResolver *aResolver,
+                                        otMdnsCacheInfo       *aInfo)
+{
+    AssertPointerIsNotNull(aIterator);
+    AssertPointerIsNotNull(aResolver);
+    AssertPointerIsNotNull(aInfo);
+
+    return AsCoreType(aInstance).Get<Dns::Multicast::Core>().GetNextIp6AddressResolver(*aIterator, *aResolver, *aInfo);
+}
+
+otError otMdnsGetNextIp4AddressResolver(otInstance            *aInstance,
+                                        otMdnsIterator        *aIterator,
+                                        otMdnsAddressResolver *aResolver,
+                                        otMdnsCacheInfo       *aInfo)
+{
+    AssertPointerIsNotNull(aIterator);
+    AssertPointerIsNotNull(aResolver);
+    AssertPointerIsNotNull(aInfo);
+
+    return AsCoreType(aInstance).Get<Dns::Multicast::Core>().GetNextIp4AddressResolver(*aIterator, *aResolver, *aInfo);
+}
+
+#endif // OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
 
 #endif // OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE && OPENTHREAD_CONFIG_MULTICAST_DNS_PUBLIC_API_ENABLE

@@ -215,10 +215,6 @@ static otIp6Prefix        sAddedExternalRoutes[kMaxExternalRoutesNum];
 static constexpr uint32_t kNat64RoutePriority = 100; ///< Priority for route to NAT64 CIDR, 100 means a high priority.
 #endif
 
-#if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
-ot::Posix::Resolver gResolver;
-#endif
-
 #if defined(RTM_NEWMADDR) || defined(__NetBSD__)
 // on some BSDs (mac OS, FreeBSD), we get RTM_NEWMADDR/RTM_DELMADDR messages, so we don't need to monitor using MLD
 // on NetBSD, MLD monitoring simply doesn't work
@@ -226,7 +222,7 @@ ot::Posix::Resolver gResolver;
 #else
 // on some platforms (Linux, but others might be made to work), we do not get information about multicast
 // group joining via AF_NETLINK or AF_ROUTE sockets.  on those platform, we must listen for IPv6 ICMP
-// MLDv2 messages to know when mulicast memberships change
+// MLDv2 messages to know when multicast memberships change
 // 		https://stackoverflow.com/questions/37346289/using-netlink-is-it-possible-to-listen-whenever-multicast-group-membership-is-ch
 #define OPENTHREAD_POSIX_USE_MLD_MONITOR 1
 #endif // defined(RTM_NEWMADDR) || defined(__NetBSD__)
@@ -483,7 +479,7 @@ static void UpdateUnicastLinux(otInstance *aInstance, const otIp6AddressInfo &aA
 #endif
     {
 #if OPENTHREAD_POSIX_CONFIG_NETIF_PREFIX_ROUTE_METRIC > 0
-        static constexpr kLinkLocalScope = 2;
+        static constexpr uint8_t kLinkLocalScope = 2;
 
         if (aAddressInfo.mScope > kLinkLocalScope)
         {
@@ -652,7 +648,8 @@ template <size_t N> otError AddRoute(const uint8_t (&aAddress)[N], uint8_t aPref
         char            buf[kBufSize];
     } req{};
     unsigned int netifIdx = otSysGetThreadNetifIndex();
-    otError      error    = OT_ERROR_NONE;
+    char         addrStrBuf[INET6_ADDRSTRLEN];
+    otError      error = OT_ERROR_NONE;
 
     static_assert(N == sizeof(in6_addr) || N == sizeof(in_addr), "aAddress should be 4 octets or 16 octets");
 
@@ -680,10 +677,17 @@ template <size_t N> otError AddRoute(const uint8_t (&aAddress)[N], uint8_t aPref
     AddRtAttrUint32(&req.header, sizeof(req), RTA_PRIORITY, aPriority);
     AddRtAttrUint32(&req.header, sizeof(req), RTA_OIF, netifIdx);
 
+    inet_ntop(req.msg.rtm_family, aAddress, addrStrBuf, sizeof(addrStrBuf));
+
     if (send(sNetlinkFd, &req, sizeof(req), 0) < 0)
     {
+        LogInfo("Failed to send request#%u to add route %s/%u", sNetlinkSequence, addrStrBuf, aPrefixLen);
         VerifyOrExit(errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK, error = OT_ERROR_BUSY);
         DieNow(OT_EXIT_ERROR_ERRNO);
+    }
+    else
+    {
+        LogInfo("Sent request#%u to add route %s/%u", sNetlinkSequence, addrStrBuf, aPrefixLen);
     }
 exit:
     return error;
@@ -699,7 +703,8 @@ template <size_t N> otError DeleteRoute(const uint8_t (&aAddress)[N], uint8_t aP
         char            buf[kBufSize];
     } req{};
     unsigned int netifIdx = otSysGetThreadNetifIndex();
-    otError      error    = OT_ERROR_NONE;
+    char         addrStrBuf[INET6_ADDRSTRLEN];
+    otError      error = OT_ERROR_NONE;
 
     static_assert(N == sizeof(in6_addr) || N == sizeof(in_addr), "aAddress should be 4 octets or 16 octets");
 
@@ -726,10 +731,17 @@ template <size_t N> otError DeleteRoute(const uint8_t (&aAddress)[N], uint8_t aP
     AddRtAttr(reinterpret_cast<nlmsghdr *>(&req), sizeof(req), RTA_DST, &aAddress, sizeof(aAddress));
     AddRtAttrUint32(&req.header, sizeof(req), RTA_OIF, netifIdx);
 
+    inet_ntop(req.msg.rtm_family, aAddress, addrStrBuf, sizeof(addrStrBuf));
+
     if (send(sNetlinkFd, &req, sizeof(req), 0) < 0)
     {
+        LogInfo("Failed to send request#%u to delete route %s/%u", sNetlinkSequence, addrStrBuf, aPrefixLen);
         VerifyOrExit(errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK, error = OT_ERROR_BUSY);
         DieNow(OT_EXIT_ERROR_ERRNO);
+    }
+    else
+    {
+        LogInfo("Sent request#%u to delete route %s/%u", sNetlinkSequence, addrStrBuf, aPrefixLen);
     }
 
 exit:
@@ -1083,7 +1095,8 @@ exit:
     }
 }
 
-#if OPENTHREAD_CONFIG_NAT64_TRANSLATOR_ENABLE || OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE
+#if OPENTHREAD_CONFIG_NAT64_TRANSLATOR_ENABLE || \
+    (OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE && OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE)
 static constexpr uint8_t kIpVersion4 = 4;
 static constexpr uint8_t kIpVersion6 = 6;
 
@@ -1099,11 +1112,10 @@ static uint8_t getIpVersion(const uint8_t *data)
 }
 #endif
 
-#if OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE
+#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE && OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE
 
 /**
  * Returns nullptr if data does not point to a valid ICMPv6 RA message.
- *
  */
 static const uint8_t *getIcmp6RaMessage(const uint8_t *data, ssize_t length)
 {
@@ -1125,7 +1137,6 @@ exit:
 
 /**
  * Returns false if the message is not an ICMPv6 RA message.
- *
  */
 static otError tryProcessIcmp6RaMessage(otInstance *aInstance, const uint8_t *data, ssize_t length)
 {
@@ -1146,12 +1157,11 @@ static otError tryProcessIcmp6RaMessage(otInstance *aInstance, const uint8_t *da
 exit:
     return error;
 }
-#endif // OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE
+#endif // OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE && OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE
 
 #ifdef __linux__
 /**
  * Returns whether the address is a required anycast address (RFC2373, 2.6.1).
- *
  */
 static bool isRequiredAnycast(const uint8_t *aAddress, uint8_t aPrefixLength)
 {
@@ -1213,7 +1223,7 @@ static void processTransmit(otInstance *aInstance)
     }
 #endif
 
-#if OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE
+#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE && OPENTHREAD_CONFIG_BORDER_ROUTING_DHCP6_PD_ENABLE
     if (tryProcessIcmp6RaMessage(aInstance, reinterpret_cast<uint8_t *>(&packet[offset]), rval) == OT_ERROR_NONE)
     {
         ExitNow();
@@ -1340,6 +1350,7 @@ static void processNetifAddrEvent(otInstance *aInstance, struct nlmsghdr *aNetli
                     netAddr.mPrefixLength = ifaddr->ifa_prefixlen;
 
                     error = otIp6AddUnicastAddress(aInstance, &netAddr);
+                    error = (error == OT_ERROR_INVALID_ARGS) ? OT_ERROR_NONE : error;
                 }
                 else
                 {
@@ -1734,19 +1745,23 @@ static void HandleNetlinkResponse(struct nlmsghdr *msg)
         requestPayloadLength = NLMSG_PAYLOAD(&err->msg, 0);
     }
 
-    rtaLength = NLMSG_PAYLOAD(msg, sizeof(struct nlmsgerr)) - requestPayloadLength;
-
-    for (struct rtattr *rta = ERR_RTA(err, requestPayloadLength); RTA_OK(rta, rtaLength);
-         rta                = RTA_NEXT(rta, rtaLength))
+    // Only extract inner TLV error if flag is set
+    if (msg->nlmsg_flags & NLM_F_ACK_TLVS)
     {
-        if (rta->rta_type == NLMSGERR_ATTR_MSG)
+        rtaLength = NLMSG_PAYLOAD(msg, sizeof(struct nlmsgerr)) - requestPayloadLength;
+
+        for (struct rtattr *rta = ERR_RTA(err, requestPayloadLength); RTA_OK(rta, rtaLength);
+             rta                = RTA_NEXT(rta, rtaLength))
         {
-            errorMsg = reinterpret_cast<const char *>(RTA_DATA(rta));
-            break;
-        }
-        else
-        {
-            LogDebg("Ignoring netlink response attribute %d (request#%u)", rta->rta_type, requestSeq);
+            if (rta->rta_type == NLMSGERR_ATTR_MSG)
+            {
+                errorMsg = reinterpret_cast<const char *>(RTA_DATA(rta));
+                break;
+            }
+            else
+            {
+                LogDebg("Ignoring netlink response attribute %d (request#%u)", rta->rta_type, requestSeq);
+            }
         }
     }
 
@@ -2264,9 +2279,6 @@ void platformNetifSetUp(void)
 #if OPENTHREAD_CONFIG_NAT64_TRANSLATOR_ENABLE
     nat64Init();
 #endif
-#if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
-    gResolver.Init();
-#endif
 }
 
 void platformNetifTearDown(void) {}
@@ -2322,10 +2334,6 @@ void platformNetifUpdateFdSet(otSysMainloopContext *aContext)
 #if OPENTHREAD_POSIX_USE_MLD_MONITOR
     FD_SET(sMLDMonitorFd, &aContext->mReadFdSet);
     FD_SET(sMLDMonitorFd, &aContext->mErrorFdSet);
-#endif
-
-#if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
-    gResolver.UpdateFdSet(*aContext);
 #endif
 
     if (sTunFd > aContext->mMaxFd)
@@ -2388,10 +2396,6 @@ void platformNetifProcess(const otSysMainloopContext *aContext)
     {
         processMLDEvent(gInstance);
     }
-#endif
-
-#if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
-    gResolver.Process(*aContext);
 #endif
 
 exit:

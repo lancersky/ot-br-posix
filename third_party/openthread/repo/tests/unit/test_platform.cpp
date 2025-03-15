@@ -27,7 +27,7 @@
  */
 
 // Disable OpenThread's own new implementation to avoid duplicate definition
-#define OT_CORE_COMMON_NEW_HPP_
+#define OT_INCLUDE_COMMON_NEW_HPP_
 #include "test_platform.h"
 
 #include <map>
@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <sys/time.h>
 #ifdef OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
+#include <openthread/tcat.h>
 #include <openthread/platform/ble.h>
 #endif
 
@@ -97,6 +98,9 @@ void testFreeInstance(otInstance *aInstance)
 }
 
 bool sDiagMode = false;
+
+static otPlatDiagOutputCallback sOutputCallback        = nullptr;
+static void                    *sOutputCallbackContext = nullptr;
 
 extern "C" {
 
@@ -224,9 +228,30 @@ exit:
     return error;
 }
 
-OT_TOOL_WEAK void otPlatDiagProcess(otInstance *, uint8_t, char *aArgs[], char *aOutput, size_t aOutputMaxLen)
+static void DiagOutput(const char *aFormat, ...)
 {
-    snprintf(aOutput, aOutputMaxLen, "diag feature '%s' is not supported\r\n", aArgs[0]);
+    va_list args;
+
+    va_start(args, aFormat);
+
+    if (sOutputCallback != nullptr)
+    {
+        sOutputCallback(aFormat, args, sOutputCallbackContext);
+    }
+
+    va_end(args);
+}
+
+OT_TOOL_WEAK void otPlatDiagSetOutputCallback(otInstance *aInstance, otPlatDiagOutputCallback aCallback, void *aContext)
+{
+    sOutputCallback        = aCallback;
+    sOutputCallbackContext = aContext;
+}
+
+OT_TOOL_WEAK otError otPlatDiagProcess(otInstance *, uint8_t, char *aArgs[])
+{
+    DiagOutput("diag feature '%s' is not supported\r\n", aArgs[0]);
+    return OT_ERROR_NONE;
 }
 
 OT_TOOL_WEAK void otPlatDiagModeSet(bool aMode) { sDiagMode = aMode; }
@@ -424,6 +449,8 @@ OT_TOOL_WEAK void otPlatTrelEnable(otInstance *, uint16_t *) {}
 OT_TOOL_WEAK void otPlatTrelDisable(otInstance *) {}
 
 OT_TOOL_WEAK void otPlatTrelSend(otInstance *, const uint8_t *, uint16_t, const otSockAddr *) {}
+
+OT_TOOL_WEAK void otPlatTrelNotifyPeerSocketAddressDifference(otInstance *, const otSockAddr *, const otSockAddr *) {}
 
 OT_TOOL_WEAK void otPlatTrelRegisterService(otInstance *, uint16_t, const uint8_t *, uint8_t) {}
 
@@ -732,6 +759,16 @@ otError otPlatBleDisable(otInstance *aInstance)
     return OT_ERROR_NONE;
 }
 
+otError otPlatBleGetAdvertisementBuffer(otInstance *aInstance, uint8_t **aAdvertisementBuffer)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    static uint8_t sAdvertisementBuffer[OT_TCAT_ADVERTISEMENT_MAX_LEN];
+
+    *aAdvertisementBuffer = sAdvertisementBuffer;
+
+    return OT_ERROR_NONE;
+}
+
 otError otPlatBleGapAdvStart(otInstance *aInstance, uint16_t aInterval)
 {
     OT_UNUSED_VARIABLE(aInstance);
@@ -765,6 +802,30 @@ otError otPlatBleGattServerIndicate(otInstance *aInstance, uint16_t aHandle, con
     OT_UNUSED_VARIABLE(aPacket);
     return OT_ERROR_NONE;
 }
+
+void otPlatBleGetLinkCapabilities(otInstance *aInstance, otBleLinkCapabilities *aBleLinkCapabilities)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+
+    aBleLinkCapabilities->mGattNotifications = true;
+    aBleLinkCapabilities->mL2CapDirect       = false;
+    aBleLinkCapabilities->mRsv               = 0;
+}
+
+bool otPlatBleSupportsMultiRadio(otInstance *aInstance)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    return false;
+}
+
+otError otPlatBleGapAdvSetData(otInstance *aInstance, uint8_t *aAdvertisementData, uint16_t aAdvertisementLen)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aAdvertisementData);
+    OT_UNUSED_VARIABLE(aAdvertisementLen);
+    return OT_ERROR_NONE;
+}
+
 #endif // OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
 
 #if OPENTHREAD_CONFIG_PLATFORM_DNSSD_ENABLE
@@ -842,10 +903,71 @@ OT_TOOL_WEAK void otPlatDnssdUnregisterKey(otInstance                 *aInstance
     OT_UNUSED_VARIABLE(aCallback);
 }
 
+OT_TOOL_WEAK void otPlatDnssdStartBrowser(otInstance *aInstance, const otPlatDnssdBrowser *aBrowser)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aBrowser);
+}
+
+OT_TOOL_WEAK void otPlatDnssdStopBrowser(otInstance *aInstance, const otPlatDnssdBrowser *aBrowser)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aBrowser);
+}
+
+OT_TOOL_WEAK void otPlatDnssdStartSrvResolver(otInstance *aInstance, const otPlatDnssdSrvResolver *aResolver)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aResolver);
+}
+
+OT_TOOL_WEAK void otPlatDnssdStopSrvResolver(otInstance *aInstance, const otPlatDnssdSrvResolver *aResolver)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aResolver);
+}
+
+OT_TOOL_WEAK void otPlatDnssdStartTxtResolver(otInstance *aInstance, const otPlatDnssdTxtResolver *aResolver)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aResolver);
+}
+
+OT_TOOL_WEAK void otPlatDnssdStopTxtResolver(otInstance *aInstance, const otPlatDnssdTxtResolver *aResolver)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aResolver);
+}
+
+OT_TOOL_WEAK void otPlatDnssdStartIp6AddressResolver(otInstance *aInstance, const otPlatDnssdAddressResolver *aResolver)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aResolver);
+}
+
+OT_TOOL_WEAK void otPlatDnssdStopIp6AddressResolver(otInstance *aInstance, const otPlatDnssdAddressResolver *aResolver)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aResolver);
+}
+
+OT_TOOL_WEAK void otPlatDnssdStartIp4AddressResolver(otInstance *aInstance, const otPlatDnssdAddressResolver *aResolver)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aResolver);
+}
+
+OT_TOOL_WEAK void otPlatDnssdStopIp4AddressResolver(otInstance *aInstance, const otPlatDnssdAddressResolver *aResolver)
+{
+    OT_UNUSED_VARIABLE(aInstance);
+    OT_UNUSED_VARIABLE(aResolver);
+}
+
 #endif // OPENTHREAD_CONFIG_PLATFORM_DNSSD_ENABLE
 
 #if OPENTHREAD_CONFIG_PLATFORM_LOG_CRASH_DUMP_ENABLE
 OT_TOOL_WEAK otError otPlatLogCrashDump(void) { return OT_ERROR_NONE; }
 #endif
 
+OT_TOOL_WEAK void otPlatAssertFail(const char *, int) {}
 } // extern "C"

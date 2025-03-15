@@ -40,9 +40,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <getopt.h>
-#include <ifaddrs.h>
 #include <libgen.h>
-#include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -55,7 +53,6 @@
 #include <openthread/platform/radio.h>
 
 #include "simul_utils.h"
-#include "utils/code_utils.h"
 
 uint32_t gNodeId = 1;
 
@@ -73,13 +70,12 @@ static void handleSignal(int aSignal)
 
 /**
  * Defines the argument return values.
- *
  */
 enum
 {
     OT_SIM_OPT_HELP               = 'h',
     OT_SIM_OPT_ENABLE_ENERGY_SCAN = 'E',
-    OT_SIM_OPT_LOCAL_HOST         = 'L',
+    OT_SIM_OPT_LOCAL_INTERFACE    = 'L',
     OT_SIM_OPT_SLEEP_TO_TX        = 't',
     OT_SIM_OPT_TIME_SPEED         = 's',
     OT_SIM_OPT_LOG_FILE           = 'l',
@@ -93,6 +89,7 @@ static void PrintUsage(const char *aProgramName, int aExitCode)
             "    %s [Options] NodeId\n"
             "Options:\n"
             "    -h --help                  Display this usage information.\n"
+            "    -L --local-interface=val   The address or name of the netif to simulate Thread radio.\n"
             "    -E --enable-energy-scan    Enable energy scan capability.\n"
             "    -t --sleep-to-tx           Let radio support direct transition from sleep to TX with CSMA.\n"
             "    -s --time-speed=val        Speed up the time in simulation.\n"
@@ -105,56 +102,6 @@ static void PrintUsage(const char *aProgramName, int aExitCode)
     exit(aExitCode);
 }
 
-static const char *GetLocalHostAddress(const char *aLocalHost)
-{
-    struct ifaddrs *ifaddr;
-    static char     ipstr[INET_ADDRSTRLEN] = {0};
-    const char     *rval                   = NULL;
-
-    {
-        struct in_addr addr;
-
-        otEXPECT_ACTION(inet_aton(aLocalHost, &addr) == 0, rval = aLocalHost);
-    }
-
-    if (getifaddrs(&ifaddr) == -1)
-    {
-        perror("getifaddrs");
-        exit(EXIT_FAILURE);
-    }
-
-    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
-    {
-        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET)
-        {
-            continue;
-        }
-
-        if (strcmp(ifa->ifa_name, aLocalHost) == 0)
-        {
-            struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
-
-            if (inet_ntop(AF_INET, &addr->sin_addr, ipstr, sizeof(ipstr)))
-            {
-                break;
-            }
-        }
-    }
-
-    freeifaddrs(ifaddr);
-
-    if (ipstr[0] == '\0')
-    {
-        fprintf(stderr, "Local host address not found!\n");
-        exit(EXIT_FAILURE);
-    }
-
-    rval = ipstr;
-
-exit:
-    return rval;
-}
-
 void otSysInit(int aArgCount, char *aArgVector[])
 {
     char    *endptr;
@@ -165,7 +112,7 @@ void otSysInit(int aArgCount, char *aArgVector[])
         {"enable-energy-scan", no_argument, 0, OT_SIM_OPT_ENABLE_ENERGY_SCAN},
         {"sleep-to-tx", no_argument, 0, OT_SIM_OPT_SLEEP_TO_TX},
         {"time-speed", required_argument, 0, OT_SIM_OPT_TIME_SPEED},
-        {"local-host", required_argument, 0, OT_SIM_OPT_LOCAL_HOST},
+        {"local-interface", required_argument, 0, OT_SIM_OPT_LOCAL_INTERFACE},
 #if (OPENTHREAD_CONFIG_LOG_OUTPUT == OPENTHREAD_CONFIG_LOG_OUTPUT_PLATFORM_DEFINED)
         {"log-file", required_argument, 0, OT_SIM_OPT_LOG_FILE},
 #endif
@@ -209,9 +156,8 @@ void otSysInit(int aArgCount, char *aArgVector[])
         case OT_SIM_OPT_SLEEP_TO_TX:
             gRadioCaps |= OT_RADIO_CAPS_SLEEP_TO_TX;
             break;
-        case OT_SIM_OPT_LOCAL_HOST:
-            gLocalHost = GetLocalHostAddress(optarg);
-            fprintf(stderr, "Simulate on %s\n", gLocalHost);
+        case OT_SIM_OPT_LOCAL_INTERFACE:
+            gLocalInterface = optarg;
             break;
         case OT_SIM_OPT_TIME_SPEED:
             speedUpFactor = (uint32_t)strtol(optarg, &endptr, 10);
@@ -253,7 +199,7 @@ void otSysInit(int aArgCount, char *aArgVector[])
 #if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
     platformTrelInit(speedUpFactor);
 #endif
-#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+#if OPENTHREAD_SIMULATION_IMPLEMENT_INFRA_IF && OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
     platformInfraIfInit();
 #endif
     platformRandomInit();
@@ -267,8 +213,8 @@ void otSysDeinit(void)
 #if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
     platformTrelDeinit();
 #endif
-#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
-    //    platformInfrIfDeinit();
+#if OPENTHREAD_SIMULATION_IMPLEMENT_INFRA_IF && OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+    platformInfraIfDeinit();
 #endif
     platformLoggingDeinit();
 }
@@ -292,7 +238,7 @@ void otSysProcessDrivers(otInstance *aInstance)
 #if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
     platformTrelUpdateFdSet(&read_fds, &write_fds, &timeout, &max_fd);
 #endif
-#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+#if OPENTHREAD_SIMULATION_IMPLEMENT_INFRA_IF && OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
     platformInfraIfUpdateFdSet(&read_fds, &write_fds, &max_fd);
 #endif
 #if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE && OPENTHREAD_SIMULATION_MDNS_SOCKET_IMPLEMENT_POSIX
@@ -329,7 +275,7 @@ void otSysProcessDrivers(otInstance *aInstance)
 #if OPENTHREAD_CONFIG_RADIO_LINK_TREL_ENABLE
     platformTrelProcess(aInstance, &read_fds, &write_fds);
 #endif
-#if OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+#if OPENTHREAD_SIMULATION_IMPLEMENT_INFRA_IF && OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
     platformInfraIfProcess(aInstance, &read_fds, &write_fds);
 #endif
 #if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE && OPENTHREAD_SIMULATION_MDNS_SOCKET_IMPLEMENT_POSIX

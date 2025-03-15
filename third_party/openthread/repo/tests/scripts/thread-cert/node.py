@@ -64,8 +64,11 @@ class OtbrDocker:
     _docker_proc = None
     _border_routing_counters = None
 
-    def __init__(self, nodeid: int, **kwargs):
+    def __init__(self, nodeid: int, backbone_network: str, **kwargs):
         self.verbose = int(float(os.getenv('VERBOSE', 0)))
+
+        assert backbone_network is not None
+        self.backbone_network = backbone_network
         try:
             self._docker_name = config.OTBR_DOCKER_NAME_PREFIX + str(nodeid)
             self._prepare_ot_rcp_sim(nodeid)
@@ -121,7 +124,7 @@ class OtbrDocker:
             '--name',
             self._docker_name,
             '--network',
-            config.BACKBONE_DOCKER_NETWORK_NAME,
+            self.backbone_network,
         ] + dns + [
             '-i',
             '--sysctl',
@@ -139,7 +142,10 @@ class OtbrDocker:
             f'trel://{config.BACKBONE_IFNAME}',
         ] + nat64_prefix
         logging.info(' '.join(cmd))
-        self._docker_proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr)
+        self._docker_proc = subprocess.Popen(cmd,
+                                             stdin=subprocess.DEVNULL,
+                                             stdout=sys.stdout if self.verbose else subprocess.DEVNULL,
+                                             stderr=sys.stderr if self.verbose else subprocess.DEVNULL)
 
         launch_docker_deadline = time.time() + 300
         launch_ok = False
@@ -148,7 +154,7 @@ class OtbrDocker:
             try:
                 subprocess.check_call(f'docker exec -i {self._docker_name} ot-ctl state', shell=True)
                 launch_ok = True
-                logging.info("OTBR Docker %s Is Ready!", self._docker_name)
+                logging.info("OTBR Docker %s on %s Is Ready!", self._docker_name, self.backbone_network)
                 break
             except subprocess.CalledProcessError:
                 time.sleep(5)
@@ -416,6 +422,12 @@ class OtbrDocker:
     def nat64_set_enabled(self, enable):
         return self.call_dbus_method('io.openthread.BorderRouter', 'SetNat64Enabled', enable)
 
+    def activate_ephemeral_key_mode(self, lifetime):
+        return self.call_dbus_method('io.openthread.BorderRouter', 'ActivateEphemeralKeyMode', lifetime)
+
+    def deactivate_ephemeral_key_mode(self, retain_active_session):
+        return self.call_dbus_method('io.openthread.BorderRouter', 'DeactivateEphemeralKeyMode', retain_active_session)
+
     @property
     def nat64_cidr(self):
         self.send_command('nat64 cidr')
@@ -487,6 +499,16 @@ class OtbrDocker:
         if type(value) is not bool:
             raise ValueError("dns_upstream_query_state must be a bool")
         return self.set_dbus_property('DnsUpstreamQueryState', value)
+
+    @property
+    def ephemeral_key_enabled(self):
+        return bool(self.get_dbus_property('EphemeralKeyEnabled'))
+
+    @ephemeral_key_enabled.setter
+    def ephemeral_key_enabled(self, value):
+        if type(value) is not bool:
+            raise ValueError("ephemeral_key_enabled must be a bool")
+        return self.set_dbus_property('EphemeralKeyEnabled', value)
 
     def read_border_routing_counters_delta(self):
         old_counters = self._border_routing_counters
@@ -603,8 +625,8 @@ class OtCli:
             if self.version != '1.1' and self.is_bbr:
                 if 'OT_CLI_PATH_BBR' in os.environ:
                     cmd = os.environ['OT_CLI_PATH_BBR']
-                elif 'top_builddir_1_3_bbr' in os.environ:
-                    srcdir = os.environ['top_builddir_1_3_bbr']
+                elif 'top_builddir_1_4_bbr' in os.environ:
+                    srcdir = os.environ['top_builddir_1_4_bbr']
                     cmd = '%s/examples/apps/cli/ot-cli-%s' % (srcdir, mode)
 
             # Load Thread device of the testing environment version (may be 1.1 or 1.2)
@@ -670,13 +692,13 @@ class OtCli:
             # Load Thread 1.2 BBR device when testing Thread 1.2 scenarios
             # which requires device with Backbone functionality.
             if self.version != '1.1' and self.is_bbr:
-                if 'OT_NCP_PATH_1_3_BBR' in os.environ:
+                if 'OT_NCP_PATH_1_4_BBR' in os.environ:
                     cmd = 'spinel-cli.py -p "%s%s" -n' % (
-                        os.environ['OT_NCP_PATH_1_3_BBR'],
+                        os.environ['OT_NCP_PATH_1_4_BBR'],
                         args,
                     )
-                elif 'top_builddir_1_3_bbr' in os.environ:
-                    srcdir = os.environ['top_builddir_1_3_bbr']
+                elif 'top_builddir_1_4_bbr' in os.environ:
+                    srcdir = os.environ['top_builddir_1_4_bbr']
                     cmd = '%s/examples/apps/ncp/ot-ncp-%s' % (srcdir, mode)
                     cmd = 'spinel-cli.py -p "%s%s" -n' % (
                         cmd,
@@ -914,7 +936,7 @@ class NodeImpl:
         cmd = cmd.strip()
         while True:
             line = self.__readline()
-            if line == cmd:
+            if line.strip() == cmd:
                 break
 
             logging.warning("expecting echo %r, but read %r", cmd, line)
@@ -1429,6 +1451,26 @@ class NodeImpl:
         self.send_command(cmd)
         self._expect_done()
 
+    def get_trel_port(self):
+        cmd = 'trel port'
+        self.send_command(cmd)
+        return int(self._expect_command_output()[0])
+
+    def get_border_agent_counters(self):
+        cmd = 'ba counters'
+        self.send_command(cmd)
+        result = self._expect_command_output()
+
+        counters = {}
+        for line in result:
+            m = re.match(r'(\w+)\: (\d+)', line)
+            if m:
+                counter_name = m.group(1)
+                counter_value = m.group(2)
+
+                counters[counter_name] = int(counter_value)
+        return counters
+
     def _encode_txt_entry(self, entry):
         """Encodes the TXT entry to the DNS-SD TXT record format as a HEX string.
 
@@ -1880,6 +1922,12 @@ class NodeImpl:
         self.send_command(cmd)
         self._expect_done()
 
+    def get_ephemeral_key_state(self):
+        cmd = 'ba ephemeralkey'
+        states = [r'Disabled', r'Stopped', r'Started', r'Connected', r'Accepted']
+        self.send_command(cmd)
+        return self._expect_result(states)
+
     def get_timeout(self):
         self.send_command('childtimeout')
         return self._expect_result(r'\d+')
@@ -2193,6 +2241,9 @@ class NodeImpl:
         self.send_command(cmd)
         self._expect_done()
 
+    #
+    # BR commands
+    #
     def enable_br(self):
         self.send_command('br enable')
         self._expect_done()
@@ -2205,6 +2256,35 @@ class NodeImpl:
         cmd = 'br omrprefix local'
         self.send_command(cmd)
         return self._expect_command_output()[0]
+
+    def get_br_peers(self) -> List[str]:
+        # Example output of `br peers` command:
+        #   rloc16:0xa800 age:00:00:50
+        #   rloc16:0x6800 age:00:00:51
+        #   Done
+        self.send_command('br peers')
+        return self._expect_command_output()
+
+    def get_br_peers_rloc16s(self) -> List[int]:
+        """parse `br peers` output and return the list of RLOC16s"""
+        return [
+            int(pair.split(':')[1], 16)
+            for line in self.get_br_peers()
+            for pair in line.split()
+            if pair.split(':')[0] == 'rloc16'
+        ]
+
+    def get_br_routers(self) -> List[str]:
+        # Example output of `br routers` command:
+        #   fe80:0:0:0:42:acff:fe14:3 (M:0 O:0 S:1) ms-since-rx:144160 reachable:yes age:00:17:36 (peer BR)
+        #   fe80:0:0:0:42:acff:fe14:2 (M:0 O:0 S:1) ms-since-rx:45179 reachable:yes age:00:17:36
+        #   Done
+        self.send_command('br routers')
+        return self._expect_command_output()
+
+    def get_br_routers_ip_addresses(self) -> List[IPv6Address]:
+        """parse `br routers` output and return the list of IPv6 addresses"""
+        return [IPv6Address(line.split()[0]) for line in self.get_br_routers()]
 
     def get_netdata_omr_prefixes(self):
         omr_prefixes = []
@@ -2219,6 +2299,20 @@ class NodeImpl:
         cmd = 'br onlinkprefix local'
         self.send_command(cmd)
         return self._expect_command_output()[0]
+
+    def pd_get_prefix(self):
+        cmd = 'br pd omrprefix'
+        self.send_command(cmd)
+        return self._expect_command_output()[0].split(" ")[0]
+
+    def pd_set_enabled(self, enable):
+        self.send_command('br pd {}'.format("enable" if enable else "disable"))
+        self._expect_done()
+
+    @property
+    def pd_state(self):
+        self.send_command('br pd state')
+        return self._expect_command_output()[0].strip()
 
     def get_netdata_non_nat64_routes(self):
         nat64_routes = []
@@ -2411,16 +2505,16 @@ class NodeImpl:
         self.send_command('netdata register')
         self._expect_done()
 
-    def netdata_publish_dnssrp_anycast(self, seqnum):
-        self.send_command(f'netdata publish dnssrp anycast {seqnum}')
+    def netdata_publish_dnssrp_anycast(self, seqnum, version=0):
+        self.send_command(f'netdata publish dnssrp anycast {seqnum} {version}')
         self._expect_done()
 
-    def netdata_publish_dnssrp_unicast(self, address, port):
-        self.send_command(f'netdata publish dnssrp unicast {address} {port}')
+    def netdata_publish_dnssrp_unicast(self, address, port, version=0):
+        self.send_command(f'netdata publish dnssrp unicast {address} {port} {version}')
         self._expect_done()
 
-    def netdata_publish_dnssrp_unicast_mleid(self, port):
-        self.send_command(f'netdata publish dnssrp unicast {port}')
+    def netdata_publish_dnssrp_unicast_mleid(self, port, version=0):
+        self.send_command(f'netdata publish dnssrp unicast {port} {version}')
         self._expect_done()
 
     def netdata_unpublish_dnssrp(self):
@@ -3255,14 +3349,14 @@ class NodeImpl:
 
         return router_table
 
-    def link_metrics_query_single_probe(self, dst_addr: str, linkmetrics_flags: str, block: str = ""):
-        cmd = 'linkmetrics query %s single %s %s' % (dst_addr, linkmetrics_flags, block)
+    def link_metrics_request_single_probe(self, dst_addr: str, linkmetrics_flags: str, mode: str = ''):
+        cmd = 'linkmetrics request %s %s single %s' % (mode, dst_addr, linkmetrics_flags)
         self.send_command(cmd)
         self.simulator.go(5)
         return self._parse_linkmetrics_query_result(self._expect_command_output())
 
-    def link_metrics_query_forward_tracking_series(self, dst_addr: str, series_id: int, block: str = ""):
-        cmd = 'linkmetrics query %s forward %d %s' % (dst_addr, series_id, block)
+    def link_metrics_request_forward_tracking_series(self, dst_addr: str, series_id: int, mode: str = ''):
+        cmd = 'linkmetrics request %s %s forward %d' % (mode, dst_addr, series_id)
         self.send_command(cmd)
         self.simulator.go(5)
         return self._parse_linkmetrics_query_result(self._expect_command_output())
@@ -3288,12 +3382,13 @@ class NodeImpl:
                 result['Status'] = line[29:]
         return result
 
-    def link_metrics_mgmt_req_enhanced_ack_based_probing(self,
-                                                         dst_addr: str,
-                                                         enable: bool,
-                                                         metrics_flags: str,
-                                                         ext_flags=''):
-        cmd = "linkmetrics mgmt %s enhanced-ack" % (dst_addr)
+    def link_metrics_config_req_enhanced_ack_based_probing(self,
+                                                           dst_addr: str,
+                                                           enable: bool,
+                                                           metrics_flags: str,
+                                                           ext_flags='',
+                                                           mode: str = ''):
+        cmd = "linkmetrics config %s %s enhanced-ack" % (mode, dst_addr)
         if enable:
             cmd = cmd + (" register %s %s" % (metrics_flags, ext_flags))
         else:
@@ -3301,9 +3396,13 @@ class NodeImpl:
         self.send_command(cmd)
         self._expect_done()
 
-    def link_metrics_mgmt_req_forward_tracking_series(self, dst_addr: str, series_id: int, series_flags: str,
-                                                      metrics_flags: str):
-        cmd = "linkmetrics mgmt %s forward %d %s %s" % (dst_addr, series_id, series_flags, metrics_flags)
+    def link_metrics_config_req_forward_tracking_series(self,
+                                                        dst_addr: str,
+                                                        series_id: int,
+                                                        series_flags: str,
+                                                        metrics_flags: str,
+                                                        mode: str = ''):
+        cmd = "linkmetrics config %s %s forward %d %s %s" % (mode, dst_addr, series_id, series_flags, metrics_flags)
         self.send_command(cmd)
         self._expect_done()
 
@@ -3709,19 +3808,27 @@ class LinuxHost():
 
         self.bash(f'ip link set {self.ETH_DEV} down')
 
-    def get_ether_addrs(self):
-        output = self.bash(f'ip -6 addr list dev {self.ETH_DEV}')
+    def get_ether_addrs(self, ipv4=False, ipv6=True):
+        output = self.bash(f'ip addr list dev {self.ETH_DEV}')
 
         addrs = []
         for line in output:
-            # line example: "inet6 fe80::42:c0ff:fea8:903/64 scope link"
+            # line examples:
+            # "inet6 fe80::42:c0ff:fea8:903/64 scope link"
+            # "inet 192.168.9.1/24 brd 192.168.9.255 scope global eth0"
             line = line.strip().split()
 
-            if line and line[0] == 'inet6':
-                addr = line[1]
-                if '/' in addr:
-                    addr = addr.split('/')[0]
-                addrs.append(addr)
+            if not line or not line[0].startswith('inet'):
+                continue
+            if line[0] == 'inet' and not ipv4:
+                continue
+            if line[0] == 'inet6' and not ipv6:
+                continue
+
+            addr = line[1]
+            if '/' in addr:
+                addr = addr.split('/')[0]
+            addrs.append(addr)
 
         logging.debug('%s: get_ether_addrs: %r', self, addrs)
         return addrs
@@ -3771,6 +3878,8 @@ class LinuxHost():
         """
         if address_type == config.ADDRESS_TYPE.BACKBONE_GUA:
             return self._getBackboneGua()
+        elif address_type == config.ADDRESS_TYPE.BACKBONE_LINK_LOCAL:
+            return self._getInfraLinkLocalAddress()
         elif address_type == config.ADDRESS_TYPE.ONLINK_ULA:
             return self._getInfraUla()
         elif address_type == config.ADDRESS_TYPE.ONLINK_GUA:
@@ -3801,6 +3910,15 @@ class LinuxHost():
 
         gua_prefix = config.ONLINK_GUA_PREFIX.split('::/')[0]
         return [addr for addr in self.get_ether_addrs() if addr.startswith(gua_prefix)]
+
+    def _getInfraLinkLocalAddress(self) -> Optional[str]:
+        """ Returns the link-local address autoconfigured on the infra link, which is started with "fe80".
+        """
+        for addr in self.get_ether_addrs():
+            if re.match(config.LINK_LOCAL_REGEX_PATTERN, addr, re.I):
+                return addr
+
+        return None
 
     def ping(self, *args, **kwargs):
         backbone = kwargs.pop('backbone', False)
@@ -3988,6 +4106,33 @@ interface eth0
 };
 EOF
 """ % (prefix, 'on' if slaac else 'off'))
+        self.bash('service radvd start')
+        self.bash('service radvd status')  # Make sure radvd service is running
+
+    def start_pd_radvd_service(self, prefix):
+        self.bash("""cat >/etc/radvd.conf <<EOF
+interface wpan0
+{
+    AdvSendAdvert on;
+
+    AdvReachableTime 20;
+    AdvRetransTimer 20;
+    AdvDefaultLifetime 180;
+    MinRtrAdvInterval 120;
+    MaxRtrAdvInterval 180;
+    AdvDefaultPreference low;
+
+    prefix %s
+    {
+        AdvOnLink on;
+        AdvAutonomous on;
+        AdvRouterAddr off;
+        AdvPreferredLifetime 180;
+        AdvValidLifetime 180;
+    };
+};
+EOF
+""" % (prefix,))
         self.bash('service radvd start')
         self.bash('service radvd status')  # Make sure radvd service is running
 

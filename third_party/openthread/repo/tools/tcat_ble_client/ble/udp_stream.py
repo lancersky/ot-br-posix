@@ -26,31 +26,33 @@
   POSSIBILITY OF SUCH DAMAGE.
 """
 
-from itertools import count, takewhile
-from typing import Iterator
 import logging
-import time
-from asyncio import sleep
 import socket
+import select
 
 logger = logging.getLogger(__name__)
 
 
 class UdpStream:
     BASE_PORT = 10000
+    MAX_SERVER_TIMEOUT_SEC = 10
 
     def __init__(self, address, node_id):
         self.__receive_buffer = b''
         self.__last_recv_time = None
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setblocking(False)
         self.address = (address, self.BASE_PORT + node_id)
 
     async def send(self, data):
-        logger.debug(f'sending {data}')
-        self.socket.sendto(data, self.address)
-        return len(data)
+        logger.debug(f'sending {len(data)} bytes: {data}')
+        return self.socket.sendto(data, self.address)
 
     async def recv(self, bufsize):
-        message = self.socket.recv(bufsize)
-        logger.debug(f'retrieved {message}')
-        return message
+        ready = select.select([self.socket], [], [], self.MAX_SERVER_TIMEOUT_SEC)
+        if ready[0]:
+            data = self.socket.recv(bufsize)
+            logger.debug(f'received {len(data)} bytes: {data}')
+            return data
+        else:
+            raise Exception('simulation UdpStream recv timeout - likely, TCAT is stopped on TCAT Device')

@@ -162,6 +162,39 @@ macro(ot_unit_test name)
 endmacro()
 
 #----------------------------------------------------------------------------------------------------------------------
+
+macro(ot_unit_ncp_test name)
+
+    # Macro to add an OpenThread unit test for NCP functions.
+    #
+    #   Unit test name will be `ot-test-ncp-{name}`. Test source file of
+    #   `test_ncp_{name}.cpp` is used. Optional extra arguments can be
+    #   passed to provide additional source files.
+
+    add_executable(ot-test-ncp-${name}
+        test_ncp_${name}.cpp ${ARGN}
+    )
+
+    target_include_directories(ot-test-ncp-${name}
+    PRIVATE
+        ${COMMON_INCLUDES}
+    )
+
+    target_link_libraries(ot-test-ncp-${name}
+    PRIVATE
+        openthread-ncp-ftd
+        ${COMMON_LIBS}
+    )
+
+    target_compile_options(ot-test-ncp-${name}
+    PRIVATE
+        -DOPENTHREAD_FTD=1
+    )
+
+    add_test(NAME ot-test-ncp-${name} COMMAND ot-test-ncp-${name})
+endmacro()
+
+#----------------------------------------------------------------------------------------------------------------------
 # Unit tests
 
 ot_unit_test(address_sanitizer)
@@ -172,10 +205,12 @@ ot_unit_test(checksum)
 ot_unit_test(child)
 ot_unit_test(child_table)
 ot_unit_test(cmd_line_parser)
+ot_unit_test(crc)
 ot_unit_test(data)
 ot_unit_test(dataset)
 ot_unit_test(dns)
 ot_unit_test(dns_client)
+ot_unit_test(dnssd_discovery_proxy)
 ot_unit_test(dso)
 ot_unit_test(ecdsa)
 ot_unit_test(flash)
@@ -206,6 +241,7 @@ ot_unit_test(ndproxy_table)
 ot_unit_test(netif)
 ot_unit_test(network_data)
 ot_unit_test(network_name)
+ot_unit_test(offset_range)
 ot_unit_test(pool)
 ot_unit_test(power_calibration)
 ot_unit_test(priority_queue)
@@ -216,15 +252,21 @@ ot_unit_test(smart_ptrs)
 ot_unit_test(spinel_buffer)
 ot_unit_test(spinel_decoder)
 ot_unit_test(spinel_encoder)
+ot_unit_test(spinel_prop_codec)
 ot_unit_test(srp_adv_proxy)
 ot_unit_test(srp_server)
 ot_unit_test(string)
+ot_unit_test(tasklet)
 ot_unit_test(tcat)
 ot_unit_test(timer)
 ot_unit_test(tlv)
 ot_unit_test(toolchain test_toolchain_c.c)
 ot_unit_test(trickle_timer)
 ot_unit_test(url)
+
+ot_unit_ncp_test(dnssd)
+ot_unit_ncp_test(infra_if)
+ot_unit_ncp_test(srp_server)
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 

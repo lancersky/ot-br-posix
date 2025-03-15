@@ -35,19 +35,7 @@
 
 #if OPENTHREAD_CONFIG_BORDER_AGENT_ENABLE
 
-#include "coap/coap_message.hpp"
-#include "common/as_core_type.hpp"
-#include "common/heap.hpp"
-#include "common/locator_getters.hpp"
-#include "common/log.hpp"
-#include "common/owned_ptr.hpp"
-#include "common/settings.hpp"
 #include "instance/instance.hpp"
-#include "meshcop/meshcop.hpp"
-#include "meshcop/meshcop_tlvs.hpp"
-#include "thread/thread_netif.hpp"
-#include "thread/thread_tlvs.hpp"
-#include "thread/uri_paths.hpp"
 
 namespace ot {
 namespace MeshCoP {
@@ -55,45 +43,232 @@ namespace MeshCoP {
 RegisterLogModule("BorderAgent");
 
 //----------------------------------------------------------------------------------------------------------------------
-// `BorderAgent::ForwardContext`
+// `BorderAgent`
 
-Error BorderAgent::ForwardContext::Init(Instance            &aInstance,
-                                        const Coap::Message &aMessage,
-                                        bool                 aPetition,
-                                        bool                 aSeparate)
+BorderAgent::BorderAgent(Instance &aInstance)
+    : InstanceLocator(aInstance)
+    , mState(kStateStopped)
+    , mDtlsTransport(aInstance, kNoLinkSecurity)
+    , mCoapDtlsSession(nullptr)
+#if OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
+    , mIdInitialized(false)
+#endif
+#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
+    , mEphemeralKeyManager(aInstance)
+#endif
 {
-    InstanceLocatorInit::Init(aInstance);
-    mMessageId   = aMessage.GetMessageId();
-    mPetition    = aPetition;
-    mSeparate    = aSeparate;
-    mType        = aMessage.GetType();
-    mTokenLength = aMessage.GetTokenLength();
-    memcpy(mToken, aMessage.GetToken(), mTokenLength);
-
-    return kErrorNone;
+    ClearAllBytes(mCounters);
 }
 
-Error BorderAgent::ForwardContext::ToHeader(Coap::Message &aMessage, uint8_t aCode) const
+#if OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
+Error BorderAgent::GetId(Id &aId)
 {
-    if ((mType == Coap::kTypeNonConfirmable) || mSeparate)
+    Error error = kErrorNone;
+
+    if (mIdInitialized)
     {
-        aMessage.Init(Coap::kTypeNonConfirmable, static_cast<Coap::Code>(aCode));
+        aId = mId;
+        ExitNow();
+    }
+
+    if (Get<Settings>().Read<Settings::BorderAgentId>(mId) != kErrorNone)
+    {
+        Random::NonCrypto::Fill(mId);
+        SuccessOrExit(error = Get<Settings>().Save<Settings::BorderAgentId>(mId));
+    }
+
+    mIdInitialized = true;
+    aId            = mId;
+
+exit:
+    return error;
+}
+
+Error BorderAgent::SetId(const Id &aId)
+{
+    Error error = kErrorNone;
+
+    SuccessOrExit(error = Get<Settings>().Save<Settings::BorderAgentId>(aId));
+    mId            = aId;
+    mIdInitialized = true;
+
+exit:
+    return error;
+}
+#endif // OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
+
+Error BorderAgent::Start(uint16_t aUdpPort)
+{
+    Error error;
+    Pskc  pskc;
+
+    Get<KeyManager>().GetPskc(pskc);
+    error = Start(aUdpPort, pskc.m8, Pskc::kSize);
+    pskc.Clear();
+
+    return error;
+}
+
+Error BorderAgent::Start(uint16_t aUdpPort, const uint8_t *aPsk, uint8_t aPskLength)
+{
+    Error error = kErrorNone;
+
+    VerifyOrExit(mState == kStateStopped);
+
+    mDtlsTransport.SetAcceptCallback(BorderAgent::HandleAcceptSession, this);
+    mDtlsTransport.SetRemoveSessionCallback(BorderAgent::HandleRemoveSession, this);
+
+    SuccessOrExit(error = mDtlsTransport.Open());
+    SuccessOrExit(error = mDtlsTransport.Bind(aUdpPort));
+
+    SuccessOrExit(error = mDtlsTransport.SetPsk(aPsk, aPskLength));
+
+    mState = kStateStarted;
+
+    LogInfo("Border Agent start listening on port %u", GetUdpPort());
+
+exit:
+    LogWarnOnError(error, "start agent");
+    return error;
+}
+
+void BorderAgent::Stop(void)
+{
+    VerifyOrExit(mState != kStateStopped);
+
+    mDtlsTransport.Close();
+
+    mState = kStateStopped;
+    LogInfo("Border Agent stopped");
+
+exit:
+    return;
+}
+
+uint16_t BorderAgent::GetUdpPort(void) const { return mDtlsTransport.GetUdpPort(); }
+
+void BorderAgent::HandleNotifierEvents(Events aEvents)
+{
+    if (aEvents.Contains(kEventThreadRoleChanged))
+    {
+        if (Get<Mle::MleRouter>().IsAttached())
+        {
+            Start();
+        }
+        else
+        {
+            Stop();
+        }
+    }
+
+    if (aEvents.ContainsAny(kEventPskcChanged))
+    {
+        Pskc pskc;
+
+        VerifyOrExit(mState != kStateStopped);
+
+        Get<KeyManager>().GetPskc(pskc);
+
+        // If there is secure session already established, it won't be impacted,
+        // new pskc will be applied for next connection.
+        SuccessOrExit(mDtlsTransport.SetPsk(pskc.m8, Pskc::kSize));
+        pskc.Clear();
+    }
+
+exit:
+    return;
+}
+
+SecureSession *BorderAgent::HandleAcceptSession(void *aContext, const Ip6::MessageInfo &aMessageInfo)
+{
+    OT_UNUSED_VARIABLE(aMessageInfo);
+
+    return static_cast<BorderAgent *>(aContext)->HandleAcceptSession();
+}
+
+BorderAgent::CoapDtlsSession *BorderAgent::HandleAcceptSession(void)
+{
+    CoapDtlsSession *session = nullptr;
+
+    VerifyOrExit(mCoapDtlsSession == nullptr);
+
+    session = CoapDtlsSession::Allocate(GetInstance(), mDtlsTransport);
+    VerifyOrExit(session != nullptr);
+
+    mCoapDtlsSession = session;
+
+exit:
+    return session;
+}
+
+void BorderAgent::HandleRemoveSession(void *aContext, SecureSession &aSession)
+{
+    static_cast<BorderAgent *>(aContext)->HandleRemoveSession(aSession);
+}
+
+void BorderAgent::HandleRemoveSession(SecureSession &aSession)
+{
+    CoapDtlsSession &coapSession = static_cast<CoapDtlsSession &>(aSession);
+
+    coapSession.Cleanup();
+    coapSession.Free();
+    mCoapDtlsSession = nullptr;
+}
+
+void BorderAgent::HandleSessionConnected(CoapDtlsSession &aSession)
+{
+    OT_UNUSED_VARIABLE(aSession);
+
+#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
+    if (mEphemeralKeyManager.OwnsSession(aSession))
+    {
+        mEphemeralKeyManager.HandleSessionConnected();
     }
     else
+#endif
     {
-        aMessage.Init(Coap::kTypeAck, static_cast<Coap::Code>(aCode));
+        mState = kStateConnected;
+        mCounters.mPskcSecureSessionSuccesses++;
     }
-
-    if (!mSeparate)
-    {
-        aMessage.SetMessageId(mMessageId);
-    }
-
-    return aMessage.SetToken(mToken, mTokenLength);
 }
 
-//----------------------------------------------------------------------------------------------------------------------
-// `BorderAgent`
+void BorderAgent::HandleSessionDisconnected(CoapDtlsSession &aSession, CoapDtlsSession::ConnectEvent aEvent)
+{
+    OT_UNUSED_VARIABLE(aSession);
+
+#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
+    if (mEphemeralKeyManager.OwnsSession(aSession))
+    {
+        mEphemeralKeyManager.HandleSessionDisconnected(aEvent);
+    }
+    else
+#endif
+    {
+        mState = kStateStarted;
+
+        if (aEvent == CoapDtlsSession::kDisconnectedError)
+        {
+            mCounters.mPskcSecureSessionFailures++;
+        }
+    }
+}
+
+void BorderAgent::HandleCommissionerPetitionAccepted(CoapDtlsSession &aSession)
+{
+    OT_UNUSED_VARIABLE(aSession);
+
+#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
+    if (mEphemeralKeyManager.OwnsSession(aSession))
+    {
+        mEphemeralKeyManager.HandleCommissionerPetitionAccepted();
+    }
+    else
+#endif
+    {
+        mState = kStateAccepted;
+        mCounters.mPskcCommissionerPetitions++;
+    }
+}
 
 Coap::Message::Code BorderAgent::CoapCodeFromError(Error aError)
 {
@@ -117,295 +292,10 @@ Coap::Message::Code BorderAgent::CoapCodeFromError(Error aError)
     return code;
 }
 
-void BorderAgent::SendErrorMessage(const ForwardContext &aForwardContext, Error aError)
-{
-    Error          error   = kErrorNone;
-    Coap::Message *message = nullptr;
-
-    VerifyOrExit((message = Get<Tmf::SecureAgent>().NewPriorityMessage()) != nullptr, error = kErrorNoBufs);
-    SuccessOrExit(error = aForwardContext.ToHeader(*message, CoapCodeFromError(aError)));
-    SuccessOrExit(error = SendMessage(*message));
-
-exit:
-    FreeMessageOnError(message, error);
-    LogWarnOnError(error, "send error CoAP message");
-}
-
-void BorderAgent::SendErrorMessage(const Coap::Message &aRequest, bool aSeparate, Error aError)
-{
-    Error          error   = kErrorNone;
-    Coap::Message *message = nullptr;
-
-    VerifyOrExit((message = Get<Tmf::SecureAgent>().NewPriorityMessage()) != nullptr, error = kErrorNoBufs);
-
-    if (aRequest.IsNonConfirmable() || aSeparate)
-    {
-        message->Init(Coap::kTypeNonConfirmable, CoapCodeFromError(aError));
-    }
-    else
-    {
-        message->Init(Coap::kTypeAck, CoapCodeFromError(aError));
-    }
-
-    if (!aSeparate)
-    {
-        message->SetMessageId(aRequest.GetMessageId());
-    }
-
-    SuccessOrExit(error = message->SetTokenFromMessage(aRequest));
-
-    SuccessOrExit(error = SendMessage(*message));
-
-exit:
-    FreeMessageOnError(message, error);
-    LogWarnOnError(error, "send error CoAP message");
-}
-
-Error BorderAgent::SendMessage(Coap::Message &aMessage)
-{
-    return Get<Tmf::SecureAgent>().SendMessage(aMessage, Get<Tmf::SecureAgent>().GetMessageInfo());
-}
-
-void BorderAgent::HandleCoapResponse(void                *aContext,
-                                     otMessage           *aMessage,
-                                     const otMessageInfo *aMessageInfo,
-                                     Error                aResult)
-{
-    OT_UNUSED_VARIABLE(aMessageInfo);
-
-    OwnedPtr<ForwardContext> forwardContext(static_cast<ForwardContext *>(aContext));
-
-    forwardContext->Get<BorderAgent>().HandleCoapResponse(*forwardContext.Get(), AsCoapMessagePtr(aMessage), aResult);
-}
-
-void BorderAgent::HandleCoapResponse(const ForwardContext &aForwardContext,
-                                     const Coap::Message  *aResponse,
-                                     Error                 aResult)
-{
-    Coap::Message *message = nullptr;
-    Error          error;
-
-    SuccessOrExit(error = aResult);
-    VerifyOrExit((message = Get<Tmf::SecureAgent>().NewPriorityMessage()) != nullptr, error = kErrorNoBufs);
-
-    if (aForwardContext.IsPetition() && aResponse->GetCode() == Coap::kCodeChanged)
-    {
-        uint8_t state;
-
-        SuccessOrExit(error = Tlv::Find<StateTlv>(*aResponse, state));
-
-        if (state == StateTlv::kAccept)
-        {
-            uint16_t sessionId;
-
-            SuccessOrExit(error = Tlv::Find<CommissionerSessionIdTlv>(*aResponse, sessionId));
-
-            IgnoreError(Get<Mle::MleRouter>().GetCommissionerAloc(mCommissionerAloc.GetAddress(), sessionId));
-            Get<ThreadNetif>().AddUnicastAddress(mCommissionerAloc);
-            IgnoreError(Get<Ip6::Udp>().AddReceiver(mUdpReceiver));
-
-            LogInfo("Commissioner accepted - SessionId:%u ALOC:%s", sessionId,
-                    mCommissionerAloc.GetAddress().ToString().AsCString());
-        }
-    }
-
-    SuccessOrExit(error = aForwardContext.ToHeader(*message, aResponse->GetCode()));
-
-    if (aResponse->GetLength() > aResponse->GetOffset())
-    {
-        SuccessOrExit(error = message->SetPayloadMarker());
-    }
-
-    SuccessOrExit(error = ForwardToCommissioner(*message, *aResponse));
-
-exit:
-
-    if (error != kErrorNone)
-    {
-        FreeMessage(message);
-
-        LogWarn("Commissioner request[%u] failed: %s", aForwardContext.GetMessageId(), ErrorToString(error));
-
-        SendErrorMessage(aForwardContext, error);
-    }
-}
-
-BorderAgent::BorderAgent(Instance &aInstance)
-    : InstanceLocator(aInstance)
-    , mState(kStateStopped)
-    , mUdpProxyPort(0)
-    , mUdpReceiver(BorderAgent::HandleUdpReceive, this)
-    , mTimer(aInstance)
-#if OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
-    , mIdInitialized(false)
-#endif
-#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
-    , mUsingEphemeralKey(false)
-    , mOldUdpPort(0)
-    , mEphemeralKeyTimer(aInstance)
-    , mEphemeralKeyTask(aInstance)
-#endif
-{
-    mCommissionerAloc.InitAsThreadOriginMeshLocal();
-}
-
-#if OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
-Error BorderAgent::GetId(Id &aId)
-{
-    Error                   error = kErrorNone;
-    Settings::BorderAgentId id;
-
-    VerifyOrExit(!mIdInitialized, error = kErrorNone);
-
-    if (Get<Settings>().Read(id) != kErrorNone)
-    {
-        Random::NonCrypto::Fill(id.GetId());
-        SuccessOrExit(error = Get<Settings>().Save(id));
-    }
-
-    mId            = id.GetId();
-    mIdInitialized = true;
-
-exit:
-    if (error == kErrorNone)
-    {
-        aId = mId;
-    }
-    return error;
-}
-
-Error BorderAgent::SetId(const Id &aId)
-{
-    Error                   error = kErrorNone;
-    Settings::BorderAgentId id;
-
-    id.SetId(aId);
-    SuccessOrExit(error = Get<Settings>().Save(id));
-    mId            = aId;
-    mIdInitialized = true;
-
-exit:
-    return error;
-}
-#endif // OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
-
-void BorderAgent::HandleNotifierEvents(Events aEvents)
-{
-    VerifyOrExit(aEvents.ContainsAny(kEventThreadRoleChanged | kEventCommissionerStateChanged));
-
-#if OPENTHREAD_CONFIG_COMMISSIONER_ENABLE && OPENTHREAD_FTD
-    VerifyOrExit(Get<Commissioner>().IsDisabled());
-#endif
-
-    if (Get<Mle::MleRouter>().IsAttached())
-    {
-        Start();
-    }
-    else
-    {
-        Stop();
-    }
-
-exit:
-    return;
-}
-
-template <> void BorderAgent::HandleTmf<kUriProxyTx>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
-{
-    OT_UNUSED_VARIABLE(aMessageInfo);
-
-    Error                     error   = kErrorNone;
-    Message                  *message = nullptr;
-    Ip6::MessageInfo          messageInfo;
-    uint16_t                  offset;
-    uint16_t                  length;
-    UdpEncapsulationTlvHeader udpEncapHeader;
-
-    VerifyOrExit(mState != kStateStopped);
-
-    SuccessOrExit(error = Tlv::FindTlvValueOffset(aMessage, Tlv::kUdpEncapsulation, offset, length));
-
-    SuccessOrExit(error = aMessage.Read(offset, udpEncapHeader));
-    offset += sizeof(UdpEncapsulationTlvHeader);
-    length -= sizeof(UdpEncapsulationTlvHeader);
-
-    VerifyOrExit(udpEncapHeader.GetSourcePort() > 0 && udpEncapHeader.GetDestinationPort() > 0, error = kErrorDrop);
-
-    VerifyOrExit((message = Get<Ip6::Udp>().NewMessage()) != nullptr, error = kErrorNoBufs);
-    SuccessOrExit(error = message->AppendBytesFromMessage(aMessage, offset, length));
-
-    messageInfo.SetSockPort(udpEncapHeader.GetSourcePort());
-    messageInfo.SetSockAddr(mCommissionerAloc.GetAddress());
-    messageInfo.SetPeerPort(udpEncapHeader.GetDestinationPort());
-
-    SuccessOrExit(error = Tlv::Find<Ip6AddressTlv>(aMessage, messageInfo.GetPeerAddr()));
-
-    SuccessOrExit(error = Get<Ip6::Udp>().SendDatagram(*message, messageInfo));
-    mUdpProxyPort = udpEncapHeader.GetSourcePort();
-
-    LogInfo("Proxy transmit sent to %s", messageInfo.GetPeerAddr().ToString().AsCString());
-
-exit:
-    FreeMessageOnError(message, error);
-    LogWarnOnError(error, "send proxy stream");
-}
-
-bool BorderAgent::HandleUdpReceive(void *aContext, const otMessage *aMessage, const otMessageInfo *aMessageInfo)
-{
-    return static_cast<BorderAgent *>(aContext)->HandleUdpReceive(AsCoreType(aMessage), AsCoreType(aMessageInfo));
-}
-
-bool BorderAgent::HandleUdpReceive(const Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
-{
-    Error          error;
-    Coap::Message *message = nullptr;
-
-    if (aMessageInfo.GetSockAddr() != mCommissionerAloc.GetAddress())
-    {
-        LogDebg("Filtered out message for commissioner: dest %s != %s (ALOC)",
-                aMessageInfo.GetSockAddr().ToString().AsCString(),
-                mCommissionerAloc.GetAddress().ToString().AsCString());
-        ExitNow(error = kErrorDestinationAddressFiltered);
-    }
-
-    VerifyOrExit(aMessage.GetLength() > 0, error = kErrorNone);
-
-    message = Get<Tmf::SecureAgent>().NewPriorityNonConfirmablePostMessage(kUriProxyRx);
-    VerifyOrExit(message != nullptr, error = kErrorNoBufs);
-
-    {
-        ExtendedTlv               extTlv;
-        UdpEncapsulationTlvHeader udpEncapHeader;
-        uint16_t                  udpLength = aMessage.GetLength() - aMessage.GetOffset();
-
-        extTlv.SetType(Tlv::kUdpEncapsulation);
-        extTlv.SetLength(sizeof(UdpEncapsulationTlvHeader) + udpLength);
-        SuccessOrExit(error = message->Append(extTlv));
-
-        udpEncapHeader.SetSourcePort(aMessageInfo.GetPeerPort());
-        udpEncapHeader.SetDestinationPort(aMessageInfo.GetSockPort());
-        SuccessOrExit(error = message->Append(udpEncapHeader));
-        SuccessOrExit(error = message->AppendBytesFromMessage(aMessage, aMessage.GetOffset(), udpLength));
-    }
-
-    SuccessOrExit(error = Tlv::Append<Ip6AddressTlv>(*message, aMessageInfo.GetPeerAddr()));
-
-    SuccessOrExit(error = SendMessage(*message));
-
-    LogInfo("Sent to commissioner on ProxyRx (c/ur)");
-
-exit:
-    FreeMessageOnError(message, error);
-    if (error != kErrorDestinationAddressFiltered)
-    {
-        LogWarnOnError(error, "notify commissioner on ProxyRx (c/ur)");
-    }
-
-    return error != kErrorDestinationAddressFiltered;
-}
-
 template <> void BorderAgent::HandleTmf<kUriRelayRx>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
 {
+    // This is from TMF agent.
+
     OT_UNUSED_VARIABLE(aMessageInfo);
 
     Coap::Message *message = nullptr;
@@ -415,74 +305,400 @@ template <> void BorderAgent::HandleTmf<kUriRelayRx>(Coap::Message &aMessage, co
 
     VerifyOrExit(aMessage.IsNonConfirmablePostRequest(), error = kErrorDrop);
 
-    message = Get<Tmf::SecureAgent>().NewPriorityNonConfirmablePostMessage(kUriRelayRx);
+    VerifyOrExit(mCoapDtlsSession != nullptr);
+
+    message = mCoapDtlsSession->NewPriorityNonConfirmablePostMessage(kUriRelayRx);
     VerifyOrExit(message != nullptr, error = kErrorNoBufs);
 
-    SuccessOrExit(error = ForwardToCommissioner(*message, aMessage));
+    SuccessOrExit(error = mCoapDtlsSession->ForwardToCommissioner(*message, aMessage));
     LogInfo("Sent to commissioner on RelayRx (c/rx)");
 
 exit:
     FreeMessageOnError(message, error);
 }
 
-Error BorderAgent::ForwardToCommissioner(Coap::Message &aForwardMessage, const Message &aMessage)
+//----------------------------------------------------------------------------------------------------------------------
+// BorderAgent::EphemeralKeyManager
+
+#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
+
+BorderAgent::EphemeralKeyManager::EphemeralKeyManager(Instance &aInstance)
+    : InstanceLocator(aInstance)
+#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_FEATURE_ENABLED_BY_DEFAULT
+    , mState(kStateStopped)
+#else
+    , mState(kStateDisabled)
+#endif
+    , mDtlsTransport(aInstance, kNoLinkSecurity)
+    , mCoapDtlsSession(nullptr)
+    , mTimer(aInstance)
+    , mCallbackTask(aInstance)
 {
-    Error error;
+}
 
-    SuccessOrExit(error = aForwardMessage.AppendBytesFromMessage(aMessage, aMessage.GetOffset(),
-                                                                 aMessage.GetLength() - aMessage.GetOffset()));
-    SuccessOrExit(error = SendMessage(aForwardMessage));
-
-    LogInfo("Sent to commissioner");
+void BorderAgent::EphemeralKeyManager::SetEnabled(bool aEnabled)
+{
+    if (aEnabled)
+    {
+        VerifyOrExit(mState == kStateDisabled);
+        SetState(kStateStopped);
+    }
+    else
+    {
+        VerifyOrExit(mState != kStateDisabled);
+        Stop();
+        SetState(kStateDisabled);
+    }
 
 exit:
-    LogWarnOnError(error, "send to commissioner");
+    return;
+}
+
+Error BorderAgent::EphemeralKeyManager::Start(const char *aKeyString, uint32_t aTimeout, uint16_t aUdpPort)
+{
+    Error    error = kErrorNone;
+    uint16_t length;
+
+    VerifyOrExit(mState == kStateStopped, error = kErrorInvalidState);
+
+    length = StringLength(aKeyString, kMaxKeyLength + 1);
+    VerifyOrExit((length >= kMinKeyLength) && (length <= kMaxKeyLength), error = kErrorInvalidArgs);
+
+    IgnoreError(mDtlsTransport.SetMaxConnectionAttempts(kMaxConnectionAttempts, HandleTransportClosed, this));
+
+    mDtlsTransport.SetAcceptCallback(EphemeralKeyManager::HandleAcceptSession, this);
+    mDtlsTransport.SetRemoveSessionCallback(EphemeralKeyManager::HandleRemoveSession, this);
+
+    SuccessOrExit(error = mDtlsTransport.Open());
+    SuccessOrExit(error = mDtlsTransport.Bind(aUdpPort));
+
+    SuccessOrExit(
+        error = mDtlsTransport.SetPsk(reinterpret_cast<const uint8_t *>(aKeyString), static_cast<uint8_t>(length)));
+
+    aTimeout = Min((aTimeout == 0) ? kDefaultTimeout : aTimeout, kMaxTimeout);
+    mTimer.Start(aTimeout);
+
+    LogInfo("Allow ephemeral key for %lu msec on port %u", ToUlong(aTimeout), GetUdpPort());
+
+    SetState(kStateStarted);
+
+exit:
+    switch (error)
+    {
+    case kErrorNone:
+        Get<BorderAgent>().mCounters.mEpskcActivations++;
+        break;
+    case kErrorInvalidState:
+        Get<BorderAgent>().mCounters.mEpskcInvalidBaStateErrors++;
+        break;
+    case kErrorInvalidArgs:
+        Get<BorderAgent>().mCounters.mEpskcInvalidArgsErrors++;
+        break;
+    default:
+        Get<BorderAgent>().mCounters.mEpskcStartSecureSessionErrors++;
+        break;
+    }
+
     return error;
 }
 
-template <>
-void BorderAgent::HandleTmf<kUriCommissionerPetition>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+void BorderAgent::EphemeralKeyManager::Stop(void) { Stop(kReasonLocalDisconnect); }
+
+void BorderAgent::EphemeralKeyManager::Stop(StopReason aReason)
 {
-    IgnoreError(ForwardToLeader(aMessage, aMessageInfo, kUriLeaderPetition));
+    switch (mState)
+    {
+    case kStateStarted:
+    case kStateConnected:
+    case kStateAccepted:
+        break;
+    case kStateDisabled:
+    case kStateStopped:
+        ExitNow();
+    }
+
+    LogInfo("Stopping ephemeral key use - reason: %s", StopReasonToString(aReason));
+    SetState(kStateStopped);
+
+    mTimer.Stop();
+    mDtlsTransport.Close();
+
+    switch (aReason)
+    {
+    case kReasonLocalDisconnect:
+        Get<BorderAgent>().mCounters.mEpskcDeactivationClears++;
+        break;
+    case kReasonPeerDisconnect:
+        Get<BorderAgent>().mCounters.mEpskcDeactivationDisconnects++;
+        break;
+    case kReasonSessionError:
+        Get<BorderAgent>().mCounters.mEpskcStartSecureSessionErrors++;
+        break;
+    case kReasonMaxFailedAttempts:
+        Get<BorderAgent>().mCounters.mEpskcDeactivationMaxAttempts++;
+        break;
+    case kReasonTimeout:
+        Get<BorderAgent>().mCounters.mEpskcDeactivationTimeouts++;
+        break;
+    case kReasonUnknown:
+        break;
+    }
+
+exit:
+    return;
 }
 
-template <>
-void BorderAgent::HandleTmf<kUriCommissionerGet>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+void BorderAgent::EphemeralKeyManager::SetState(State aState)
 {
-    IgnoreError(ForwardToLeader(aMessage, aMessageInfo, kUriCommissionerGet));
+    VerifyOrExit(mState != aState);
+    LogInfo("Ephemeral key - state: %s -> %s", StateToString(mState), StateToString(aState));
+    mState = aState;
+    mCallbackTask.Post();
+
+exit:
+    return;
 }
 
-template <>
-void BorderAgent::HandleTmf<kUriCommissionerSet>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+SecureSession *BorderAgent::EphemeralKeyManager::HandleAcceptSession(void                   *aContext,
+                                                                     const Ip6::MessageInfo &aMessageInfo)
 {
-    IgnoreError(ForwardToLeader(aMessage, aMessageInfo, kUriCommissionerSet));
+    OT_UNUSED_VARIABLE(aMessageInfo);
+
+    return static_cast<EphemeralKeyManager *>(aContext)->HandleAcceptSession();
 }
 
-template <> void BorderAgent::HandleTmf<kUriActiveGet>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+BorderAgent::CoapDtlsSession *BorderAgent::EphemeralKeyManager::HandleAcceptSession(void)
 {
-    IgnoreError(ForwardToLeader(aMessage, aMessageInfo, kUriActiveGet));
+    CoapDtlsSession *session = nullptr;
+
+    VerifyOrExit(mCoapDtlsSession == nullptr);
+
+    session = CoapDtlsSession::Allocate(GetInstance(), mDtlsTransport);
+    VerifyOrExit(session != nullptr);
+
+    mCoapDtlsSession = session;
+
+exit:
+    return session;
 }
 
-template <> void BorderAgent::HandleTmf<kUriActiveSet>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+void BorderAgent::EphemeralKeyManager::HandleRemoveSession(void *aContext, SecureSession &aSession)
 {
-    IgnoreError(ForwardToLeader(aMessage, aMessageInfo, kUriActiveSet));
+    static_cast<EphemeralKeyManager *>(aContext)->HandleRemoveSession(aSession);
 }
 
-template <> void BorderAgent::HandleTmf<kUriPendingGet>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+void BorderAgent::EphemeralKeyManager::HandleRemoveSession(SecureSession &aSession)
 {
-    IgnoreError(ForwardToLeader(aMessage, aMessageInfo, kUriPendingGet));
+    CoapDtlsSession &coapSession = static_cast<CoapDtlsSession &>(aSession);
+
+    coapSession.Cleanup();
+    coapSession.Free();
+    mCoapDtlsSession = nullptr;
 }
 
-template <> void BorderAgent::HandleTmf<kUriPendingSet>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+void BorderAgent::EphemeralKeyManager::HandleSessionConnected(void)
 {
-    IgnoreError(ForwardToLeader(aMessage, aMessageInfo, kUriPendingSet));
+    SetState(kStateConnected);
+    Get<BorderAgent>().mCounters.mEpskcSecureSessionSuccesses++;
 }
 
-template <>
-void BorderAgent::HandleTmf<kUriCommissionerKeepAlive>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+void BorderAgent::EphemeralKeyManager::HandleSessionDisconnected(SecureSession::ConnectEvent aEvent)
 {
-    VerifyOrExit(mState != kStateStopped);
+    StopReason reason = kReasonUnknown;
 
+    // The ephemeral key can be used once
+
+    VerifyOrExit((mState == kStateConnected) || (mState == kStateAccepted));
+
+    switch (aEvent)
+    {
+    case SecureSession::kDisconnectedError:
+        reason = kReasonSessionError;
+        break;
+    case SecureSession::kDisconnectedPeerClosed:
+        reason = kReasonPeerDisconnect;
+        break;
+    case SecureSession::kDisconnectedMaxAttempts:
+        reason = kReasonMaxFailedAttempts;
+        break;
+    default:
+        break;
+    }
+
+    Stop(reason);
+
+exit:
+    return;
+}
+
+void BorderAgent::EphemeralKeyManager::HandleCommissionerPetitionAccepted(void)
+{
+    SetState(kStateAccepted);
+    Get<BorderAgent>().mCounters.mEpskcCommissionerPetitions++;
+}
+
+void BorderAgent::EphemeralKeyManager::HandleTimer(void) { Stop(kReasonTimeout); }
+
+void BorderAgent::EphemeralKeyManager::HandleTask(void) { mCallback.InvokeIfSet(); }
+
+void BorderAgent::EphemeralKeyManager::HandleTransportClosed(void *aContext)
+{
+    reinterpret_cast<EphemeralKeyManager *>(aContext)->HandleTransportClosed();
+}
+
+void BorderAgent::EphemeralKeyManager::HandleTransportClosed(void)
+{
+    Stop(kReasonMaxFailedAttempts);
+    ;
+}
+
+const char *BorderAgent::EphemeralKeyManager::StateToString(State aState)
+{
+    static const char *const kStateStrings[] = {
+        "Disabled",  // (0) kStateDisabled
+        "Stopped",   // (1) kStateStopped
+        "Started",   // (2) kStateStarted
+        "Connected", // (3) kStateConnected
+        "Accepted",  // (4) kStateAccepted
+    };
+
+    struct EnumCheck
+    {
+        InitEnumValidatorCounter();
+        ValidateNextEnum(kStateDisabled);
+        ValidateNextEnum(kStateStopped);
+        ValidateNextEnum(kStateStarted);
+        ValidateNextEnum(kStateConnected);
+        ValidateNextEnum(kStateAccepted);
+    };
+
+    return kStateStrings[aState];
+}
+
+#if OT_SHOULD_LOG_AT(OT_LOG_LEVEL_INFO)
+
+const char *BorderAgent::EphemeralKeyManager::StopReasonToString(StopReason aReason)
+{
+    static const char *const kReasonStrings[] = {
+        "LocalDisconnect",   // (0) kReasonLocalDisconnect
+        "PeerDisconnect",    // (1) kReasonPeerDisconnect
+        "SessionError",      // (2) kReasonSessionError
+        "MaxFailedAttempts", // (3) kReasonMaxFailedAttempts
+        "Timeout",           // (4) kReasonTimeout
+        "Unknown",           // (5) kReasonUnknown
+    };
+
+    struct EnumCheck
+    {
+        InitEnumValidatorCounter();
+        ValidateNextEnum(kReasonLocalDisconnect);
+        ValidateNextEnum(kReasonPeerDisconnect);
+        ValidateNextEnum(kReasonSessionError);
+        ValidateNextEnum(kReasonMaxFailedAttempts);
+        ValidateNextEnum(kReasonTimeout);
+        ValidateNextEnum(kReasonUnknown);
+    };
+
+    return kReasonStrings[aReason];
+}
+
+#endif // OT_SHOULD_LOG_AT(OT_LOG_LEVEL_INFO)
+
+#endif // OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
+
+//----------------------------------------------------------------------------------------------------------------------
+// `BorderAgent::CoapDtlsSession
+
+BorderAgent::CoapDtlsSession::CoapDtlsSession(Instance &aInstance, Dtls::Transport &aDtlsTransport)
+    : Coap::SecureSession(aInstance, aDtlsTransport)
+    , mIsActiveCommissioner(false)
+    , mTimer(aInstance, HandleTimer, this)
+    , mUdpReceiver(HandleUdpReceive, this)
+{
+    mCommissionerAloc.InitAsThreadOriginMeshLocal();
+
+    SetResourceHandler(&HandleResource);
+    SetConnectCallback(&HandleConnected, this);
+}
+
+void BorderAgent::CoapDtlsSession::Cleanup(void)
+{
+    mTimer.Stop();
+    IgnoreError(Get<Ip6::Udp>().RemoveReceiver(mUdpReceiver));
+    Get<ThreadNetif>().RemoveUnicastAddress(mCommissionerAloc);
+
+    Coap::SecureSession::Cleanup();
+}
+
+bool BorderAgent::CoapDtlsSession::HandleResource(CoapBase               &aCoapBase,
+                                                  const char             *aUriPath,
+                                                  Coap::Message          &aMessage,
+                                                  const Ip6::MessageInfo &aMessageInfo)
+{
+    return static_cast<CoapDtlsSession &>(aCoapBase).HandleResource(aUriPath, aMessage, aMessageInfo);
+}
+
+bool BorderAgent::CoapDtlsSession::HandleResource(const char             *aUriPath,
+                                                  Coap::Message          &aMessage,
+                                                  const Ip6::MessageInfo &aMessageInfo)
+{
+    bool didHandle = true;
+    Uri  uri       = UriFromPath(aUriPath);
+
+    switch (uri)
+    {
+    case kUriCommissionerPetition:
+        IgnoreError(ForwardToLeader(aMessage, aMessageInfo, kUriLeaderPetition));
+        break;
+    case kUriCommissionerKeepAlive:
+        HandleTmfCommissionerKeepAlive(aMessage, aMessageInfo);
+        break;
+    case kUriRelayTx:
+        HandleTmfRelayTx(aMessage);
+        break;
+    case kUriCommissionerGet:
+    case kUriActiveGet:
+    case kUriPendingGet:
+        HandleTmfDatasetGet(aMessage, uri);
+        break;
+    case kUriProxyTx:
+        HandleTmfProxyTx(aMessage);
+        break;
+    default:
+        didHandle = false;
+        break;
+    }
+
+    return didHandle;
+}
+
+void BorderAgent::CoapDtlsSession::HandleConnected(ConnectEvent aEvent, void *aContext)
+{
+    static_cast<CoapDtlsSession *>(aContext)->HandleConnected(aEvent);
+}
+
+void BorderAgent::CoapDtlsSession::HandleConnected(ConnectEvent aEvent)
+{
+    if (aEvent == kConnected)
+    {
+        LogInfo("SecureSession connected");
+        mTimer.Start(kKeepAliveTimeout);
+        Get<BorderAgent>().HandleSessionConnected(*this);
+    }
+    else
+    {
+        LogInfo("SecureSession disconnected");
+        IgnoreError(Get<Ip6::Udp>().RemoveReceiver(mUdpReceiver));
+        Get<ThreadNetif>().RemoveUnicastAddress(mCommissionerAloc);
+
+        Get<BorderAgent>().HandleSessionDisconnected(*this, aEvent);
+    }
+}
+
+void BorderAgent::CoapDtlsSession::HandleTmfCommissionerKeepAlive(Coap::Message          &aMessage,
+                                                                  const Ip6::MessageInfo &aMessageInfo)
+{
+    VerifyOrExit(mIsActiveCommissioner);
     SuccessOrExit(ForwardToLeader(aMessage, aMessageInfo, kUriLeaderKeepAlive));
     mTimer.Start(kKeepAliveTimeout);
 
@@ -490,40 +706,9 @@ exit:
     return;
 }
 
-template <> void BorderAgent::HandleTmf<kUriRelayTx>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
-{
-    OT_UNUSED_VARIABLE(aMessageInfo);
-
-    Error            error = kErrorNone;
-    uint16_t         joinerRouterRloc;
-    Coap::Message   *message = nullptr;
-    Tmf::MessageInfo messageInfo(GetInstance());
-
-    VerifyOrExit(mState != kStateStopped);
-
-    VerifyOrExit(aMessage.IsNonConfirmablePostRequest());
-
-    SuccessOrExit(error = Tlv::Find<JoinerRouterLocatorTlv>(aMessage, joinerRouterRloc));
-
-    message = Get<Tmf::Agent>().NewPriorityNonConfirmablePostMessage(kUriRelayTx);
-    VerifyOrExit(message != nullptr, error = kErrorNoBufs);
-
-    SuccessOrExit(error = message->AppendBytesFromMessage(aMessage, aMessage.GetOffset(),
-                                                          aMessage.GetLength() - aMessage.GetOffset()));
-
-    messageInfo.SetSockAddrToRlocPeerAddrTo(joinerRouterRloc);
-    messageInfo.SetSockPortToTmf();
-
-    SuccessOrExit(error = Get<Tmf::Agent>().SendMessage(*message, messageInfo));
-
-    LogInfo("Sent to joiner router request on RelayTx (c/tx)");
-
-exit:
-    FreeMessageOnError(message, error);
-    LogWarnOnError(error, "send to joiner router request RelayTx (c/tx)");
-}
-
-Error BorderAgent::ForwardToLeader(const Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo, Uri aUri)
+Error BorderAgent::CoapDtlsSession::ForwardToLeader(const Coap::Message    &aMessage,
+                                                    const Ip6::MessageInfo &aMessageInfo,
+                                                    Uri                     aUri)
 {
     Error                    error = kErrorNone;
     OwnedPtr<ForwardContext> forwardContext;
@@ -531,8 +716,7 @@ Error BorderAgent::ForwardToLeader(const Coap::Message &aMessage, const Ip6::Mes
     Coap::Message           *message  = nullptr;
     bool                     petition = false;
     bool                     separate = false;
-
-    VerifyOrExit(mState != kStateStopped);
+    OffsetRange              offsetRange;
 
     switch (aUri)
     {
@@ -549,19 +733,19 @@ Error BorderAgent::ForwardToLeader(const Coap::Message &aMessage, const Ip6::Mes
 
     if (separate)
     {
-        SuccessOrExit(error = Get<Tmf::SecureAgent>().SendAck(aMessage, aMessageInfo));
+        SuccessOrExit(error = SendAck(aMessage, aMessageInfo));
     }
 
-    forwardContext.Reset(ForwardContext::AllocateAndInit(GetInstance(), aMessage, petition, separate));
+    forwardContext.Reset(ForwardContext::Allocate(*this, aMessage, petition, separate));
     VerifyOrExit(!forwardContext.IsNull(), error = kErrorNoBufs);
 
     message = Get<Tmf::Agent>().NewPriorityConfirmablePostMessage(aUri);
     VerifyOrExit(message != nullptr, error = kErrorNoBufs);
 
-    SuccessOrExit(error = message->AppendBytesFromMessage(aMessage, aMessage.GetOffset(),
-                                                          aMessage.GetLength() - aMessage.GetOffset()));
+    offsetRange.InitFromMessageOffsetToEnd(aMessage);
+    SuccessOrExit(error = message->AppendBytesFromMessage(aMessage, offsetRange));
 
-    SuccessOrExit(error = messageInfo.SetSockAddrToRlocPeerAddrToLeaderAloc());
+    messageInfo.SetSockAddrToRlocPeerAddrToLeaderAloc();
     messageInfo.SetSockPortToTmf();
 
     SuccessOrExit(error =
@@ -587,220 +771,339 @@ exit:
     return error;
 }
 
-void BorderAgent::HandleConnected(bool aConnected, void *aContext)
+void BorderAgent::CoapDtlsSession::HandleCoapResponse(void                *aContext,
+                                                      otMessage           *aMessage,
+                                                      const otMessageInfo *aMessageInfo,
+                                                      otError              aResult)
 {
-    static_cast<BorderAgent *>(aContext)->HandleConnected(aConnected);
+    OT_UNUSED_VARIABLE(aMessageInfo);
+
+    OwnedPtr<ForwardContext> forwardContext(static_cast<ForwardContext *>(aContext));
+
+    forwardContext->mSession.HandleCoapResponse(*forwardContext.Get(), AsCoapMessagePtr(aMessage), aResult);
 }
 
-void BorderAgent::HandleConnected(bool aConnected)
+void BorderAgent::CoapDtlsSession::HandleCoapResponse(const ForwardContext &aForwardContext,
+                                                      const Coap::Message  *aResponse,
+                                                      Error                 aResult)
 {
-    if (aConnected)
-    {
-        LogInfo("Commissioner connected");
-        mState = kStateActive;
-        mTimer.Start(kKeepAliveTimeout);
-    }
-    else
-    {
-        LogInfo("Commissioner disconnected");
-        IgnoreError(Get<Ip6::Udp>().RemoveReceiver(mUdpReceiver));
-        Get<ThreadNetif>().RemoveUnicastAddress(mCommissionerAloc);
+    Coap::Message *message = nullptr;
+    Error          error;
 
-#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
-        if (mUsingEphemeralKey)
+    SuccessOrExit(error = aResult);
+    VerifyOrExit((message = NewPriorityMessage()) != nullptr, error = kErrorNoBufs);
+
+    if (aForwardContext.mPetition && aResponse->GetCode() == Coap::kCodeChanged)
+    {
+        uint8_t state;
+
+        SuccessOrExit(error = Tlv::Find<StateTlv>(*aResponse, state));
+
+        if (state == StateTlv::kAccept)
         {
-            RestartAfterRemovingEphemeralKey();
+            uint16_t sessionId;
+
+            SuccessOrExit(error = Tlv::Find<CommissionerSessionIdTlv>(*aResponse, sessionId));
+
+            Get<Mle::Mle>().GetCommissionerAloc(sessionId, mCommissionerAloc.GetAddress());
+            Get<ThreadNetif>().AddUnicastAddress(mCommissionerAloc);
+            IgnoreError(Get<Ip6::Udp>().AddReceiver(mUdpReceiver));
+            mIsActiveCommissioner = true;
+            Get<BorderAgent>().HandleCommissionerPetitionAccepted(*this);
+
+            LogInfo("Commissioner accepted - SessionId:%u ALOC:%s", sessionId,
+                    mCommissionerAloc.GetAddress().ToString().AsCString());
         }
         else
-#endif
         {
-            mState        = kStateStarted;
-            mUdpProxyPort = 0;
+            LogInfo("Commissioner rejected");
         }
     }
-}
 
-uint16_t BorderAgent::GetUdpPort(void) const { return Get<Tmf::SecureAgent>().GetUdpPort(); }
+    SuccessOrExit(error = aForwardContext.ToHeader(*message, aResponse->GetCode()));
 
-Error BorderAgent::Start(uint16_t aUdpPort)
-{
-    Error error;
-    Pskc  pskc;
-
-    Get<KeyManager>().GetPskc(pskc);
-    error = Start(aUdpPort, pskc.m8, Pskc::kSize);
-    pskc.Clear();
-
-    return error;
-}
-
-Error BorderAgent::Start(uint16_t aUdpPort, const uint8_t *aPsk, uint8_t aPskLength)
-{
-    Error error = kErrorNone;
-
-    VerifyOrExit(mState == kStateStopped);
-
-#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
-    if (mUsingEphemeralKey)
+    if (aResponse->GetLength() > aResponse->GetOffset())
     {
-        SuccessOrExit(error = Get<Tmf::SecureAgent>().Start(aUdpPort, kMaxEphemeralKeyConnectionAttempts,
-                                                            HandleSecureAgentStopped, this));
-    }
-    else
-#endif
-    {
-        SuccessOrExit(error = Get<Tmf::SecureAgent>().Start(aUdpPort));
+        SuccessOrExit(error = message->SetPayloadMarker());
     }
 
-    SuccessOrExit(error = Get<Tmf::SecureAgent>().SetPsk(aPsk, aPskLength));
-
-    Get<Tmf::SecureAgent>().SetConnectedCallback(HandleConnected, this);
-
-    mState        = kStateStarted;
-    mUdpProxyPort = 0;
-
-    LogInfo("Border Agent start listening on port %u", GetUdpPort());
+    SuccessOrExit(error = ForwardToCommissioner(*message, *aResponse));
 
 exit:
-    LogWarnOnError(error, "start agent");
-    return error;
-}
-
-void BorderAgent::HandleTimeout(void)
-{
-    if (Get<Tmf::SecureAgent>().IsConnected())
-    {
-        Get<Tmf::SecureAgent>().Disconnect();
-        LogWarn("Reset commissioner session");
-    }
-}
-
-void BorderAgent::Stop(void)
-{
-    VerifyOrExit(mState != kStateStopped);
-
-#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
-    if (mUsingEphemeralKey)
-    {
-        mUsingEphemeralKey = false;
-        mEphemeralKeyTimer.Stop();
-        mEphemeralKeyTask.Post();
-    }
-#endif
-
-    mTimer.Stop();
-    Get<Tmf::SecureAgent>().Stop();
-
-    mState        = kStateStopped;
-    mUdpProxyPort = 0;
-    LogInfo("Border Agent stopped");
-
-exit:
-    return;
-}
-
-#if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
-
-Error BorderAgent::SetEphemeralKey(const char *aKeyString, uint32_t aTimeout, uint16_t aUdpPort)
-{
-    Error    error  = kErrorNone;
-    uint16_t length = StringLength(aKeyString, kMaxEphemeralKeyLength + 1);
-
-    VerifyOrExit(mState == kStateStarted, error = kErrorInvalidState);
-    VerifyOrExit((length >= kMinEphemeralKeyLength) && (length <= kMaxEphemeralKeyLength), error = kErrorInvalidArgs);
-
-    if (!mUsingEphemeralKey)
-    {
-        mOldUdpPort = GetUdpPort();
-    }
-
-    Stop();
-
-    // We set the `mUsingEphemeralKey` before `Start()` since
-    // callbacks (like `HandleConnected()`) may be invoked from
-    // `Start()` itself.
-
-    mUsingEphemeralKey = true;
-
-    error = Start(aUdpPort, reinterpret_cast<const uint8_t *>(aKeyString), static_cast<uint8_t>(length));
 
     if (error != kErrorNone)
     {
-        mUsingEphemeralKey = false;
-        IgnoreError(Start(mOldUdpPort));
-        ExitNow();
+        FreeMessage(message);
+
+        LogWarn("Commissioner request[%u] failed: %s", aForwardContext.mMessageId, ErrorToString(error));
+
+        SendErrorMessage(aForwardContext, error);
     }
+}
 
-    mEphemeralKeyTask.Post();
+bool BorderAgent::CoapDtlsSession::HandleUdpReceive(void                *aContext,
+                                                    const otMessage     *aMessage,
+                                                    const otMessageInfo *aMessageInfo)
+{
+    return static_cast<CoapDtlsSession *>(aContext)->HandleUdpReceive(AsCoreType(aMessage), AsCoreType(aMessageInfo));
+}
 
-    if (aTimeout == 0)
-    {
-        aTimeout = kDefaultEphemeralKeyTimeout;
-    }
+bool BorderAgent::CoapDtlsSession::HandleUdpReceive(const Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+{
+    Error                     error     = kErrorNone;
+    Coap::Message            *message   = nullptr;
+    bool                      didHandle = false;
+    ExtendedTlv               extTlv;
+    UdpEncapsulationTlvHeader udpEncapHeader;
+    OffsetRange               offsetRange;
 
-    aTimeout = Min(aTimeout, kMaxEphemeralKeyTimeout);
+    VerifyOrExit(aMessageInfo.GetSockAddr() == mCommissionerAloc.GetAddress());
 
-    mEphemeralKeyTimer.Start(aTimeout);
+    didHandle = true;
 
-    LogInfo("Allow ephemeral key for %lu msec on port %u", ToUlong(aTimeout), GetUdpPort());
+    VerifyOrExit(aMessage.GetLength() > 0);
+
+    message = NewPriorityNonConfirmablePostMessage(kUriProxyRx);
+    VerifyOrExit(message != nullptr, error = kErrorNoBufs);
+
+    offsetRange.InitFromMessageOffsetToEnd(aMessage);
+
+    extTlv.SetType(Tlv::kUdpEncapsulation);
+    extTlv.SetLength(sizeof(UdpEncapsulationTlvHeader) + offsetRange.GetLength());
+
+    udpEncapHeader.SetSourcePort(aMessageInfo.GetPeerPort());
+    udpEncapHeader.SetDestinationPort(aMessageInfo.GetSockPort());
+
+    SuccessOrExit(error = message->Append(extTlv));
+    SuccessOrExit(error = message->Append(udpEncapHeader));
+    SuccessOrExit(error = message->AppendBytesFromMessage(aMessage, offsetRange));
+
+    SuccessOrExit(error = Tlv::Append<Ip6AddressTlv>(*message, aMessageInfo.GetPeerAddr()));
+
+    SuccessOrExit(error = SendMessage(*message));
+
+    LogInfo("Sent ProxyRx (c/ur) to commissioner");
 
 exit:
+    FreeMessageOnError(message, error);
+    LogWarnOnError(error, "send ProxyRx (c/ur)");
+
+    return didHandle;
+}
+
+Error BorderAgent::CoapDtlsSession::ForwardToCommissioner(Coap::Message &aForwardMessage, const Message &aMessage)
+{
+    Error       error = kErrorNone;
+    OffsetRange offsetRange;
+
+    offsetRange.InitFromMessageOffsetToEnd(aMessage);
+    SuccessOrExit(error = aForwardMessage.AppendBytesFromMessage(aMessage, offsetRange));
+
+    SuccessOrExit(error = SendMessage(aForwardMessage));
+
+    LogInfo("Sent to commissioner");
+
+exit:
+    LogWarnOnError(error, "send to commissioner");
     return error;
 }
 
-void BorderAgent::ClearEphemeralKey(void)
+void BorderAgent::CoapDtlsSession::SendErrorMessage(const ForwardContext &aForwardContext, Error aError)
 {
-    VerifyOrExit(mUsingEphemeralKey);
+    Error          error   = kErrorNone;
+    Coap::Message *message = nullptr;
 
-    LogInfo("Clearing ephemeral key");
-    mEphemeralKeyTimer.Stop();
+    VerifyOrExit((message = NewPriorityMessage()) != nullptr, error = kErrorNoBufs);
+    SuccessOrExit(error = aForwardContext.ToHeader(*message, CoapCodeFromError(aError)));
+    SuccessOrExit(error = SendMessage(*message));
 
-    switch (mState)
+exit:
+    FreeMessageOnError(message, error);
+    LogWarnOnError(error, "send error CoAP message");
+}
+
+void BorderAgent::CoapDtlsSession::SendErrorMessage(const Coap::Message &aRequest, bool aSeparate, Error aError)
+{
+    Error          error   = kErrorNone;
+    Coap::Message *message = nullptr;
+
+    VerifyOrExit((message = NewPriorityMessage()) != nullptr, error = kErrorNoBufs);
+
+    if (aRequest.IsNonConfirmable() || aSeparate)
     {
-    case kStateStarted:
-        RestartAfterRemovingEphemeralKey();
+        message->Init(Coap::kTypeNonConfirmable, CoapCodeFromError(aError));
+    }
+    else
+    {
+        message->Init(Coap::kTypeAck, CoapCodeFromError(aError));
+    }
+
+    if (!aSeparate)
+    {
+        message->SetMessageId(aRequest.GetMessageId());
+    }
+
+    SuccessOrExit(error = message->SetTokenFromMessage(aRequest));
+
+    SuccessOrExit(error = SendMessage(*message));
+
+exit:
+    FreeMessageOnError(message, error);
+    LogWarnOnError(error, "send error CoAP message");
+}
+
+void BorderAgent::CoapDtlsSession::HandleTmfProxyTx(Coap::Message &aMessage)
+{
+    Error                     error   = kErrorNone;
+    Message                  *message = nullptr;
+    Ip6::MessageInfo          messageInfo;
+    OffsetRange               offsetRange;
+    UdpEncapsulationTlvHeader udpEncapHeader;
+
+    SuccessOrExit(error = Tlv::FindTlvValueOffsetRange(aMessage, Tlv::kUdpEncapsulation, offsetRange));
+
+    SuccessOrExit(error = aMessage.Read(offsetRange, udpEncapHeader));
+    offsetRange.AdvanceOffset(sizeof(UdpEncapsulationTlvHeader));
+
+    VerifyOrExit(udpEncapHeader.GetSourcePort() > 0 && udpEncapHeader.GetDestinationPort() > 0, error = kErrorDrop);
+
+    VerifyOrExit((message = Get<Ip6::Udp>().NewMessage()) != nullptr, error = kErrorNoBufs);
+    SuccessOrExit(error = message->AppendBytesFromMessage(aMessage, offsetRange));
+
+    messageInfo.SetSockPort(udpEncapHeader.GetSourcePort());
+    messageInfo.SetSockAddr(mCommissionerAloc.GetAddress());
+    messageInfo.SetPeerPort(udpEncapHeader.GetDestinationPort());
+
+    SuccessOrExit(error = Tlv::Find<Ip6AddressTlv>(aMessage, messageInfo.GetPeerAddr()));
+
+    SuccessOrExit(error = Get<Ip6::Udp>().SendDatagram(*message, messageInfo));
+
+    LogInfo("Proxy transmit sent to %s", messageInfo.GetPeerAddr().ToString().AsCString());
+
+exit:
+    FreeMessageOnError(message, error);
+    LogWarnOnError(error, "send proxy stream");
+}
+
+void BorderAgent::CoapDtlsSession::HandleTmfRelayTx(Coap::Message &aMessage)
+{
+    Error            error = kErrorNone;
+    uint16_t         joinerRouterRloc;
+    Coap::Message   *message = nullptr;
+    Tmf::MessageInfo messageInfo(GetInstance());
+    OffsetRange      offsetRange;
+
+    VerifyOrExit(aMessage.IsNonConfirmablePostRequest());
+
+    SuccessOrExit(error = Tlv::Find<JoinerRouterLocatorTlv>(aMessage, joinerRouterRloc));
+
+    message = Get<Tmf::Agent>().NewPriorityNonConfirmablePostMessage(kUriRelayTx);
+    VerifyOrExit(message != nullptr, error = kErrorNoBufs);
+
+    offsetRange.InitFromMessageOffsetToEnd(aMessage);
+    SuccessOrExit(error = message->AppendBytesFromMessage(aMessage, offsetRange));
+
+    messageInfo.SetSockAddrToRlocPeerAddrTo(joinerRouterRloc);
+    messageInfo.SetSockPortToTmf();
+
+    SuccessOrExit(error = Get<Tmf::Agent>().SendMessage(*message, messageInfo));
+
+    LogInfo("Sent to joiner router request on RelayTx (c/tx)");
+
+exit:
+    FreeMessageOnError(message, error);
+    LogWarnOnError(error, "send to joiner router request RelayTx (c/tx)");
+}
+
+void BorderAgent::CoapDtlsSession::HandleTmfDatasetGet(Coap::Message &aMessage, Uri aUri)
+{
+    Error          error    = kErrorNone;
+    Coap::Message *response = nullptr;
+
+    // When processing `MGMT_GET` request directly on Border Agent,
+    // the Security Policy flags (O-bit) should be ignored to allow
+    // the commissioner candidate to get the full Operational Dataset.
+
+    switch (aUri)
+    {
+    case kUriActiveGet:
+        response = Get<ActiveDatasetManager>().ProcessGetRequest(aMessage, DatasetManager::kIgnoreSecurityPolicyFlags);
+        Get<BorderAgent>().mCounters.mMgmtActiveGets++;
         break;
 
-    case kStateStopped:
-    case kStateActive:
-        // If there is an active commissioner connection, we wait till
-        // it gets disconnected before removing ephemeral key and
-        // restarting the agent.
+    case kUriPendingGet:
+        response = Get<PendingDatasetManager>().ProcessGetRequest(aMessage, DatasetManager::kIgnoreSecurityPolicyFlags);
+        Get<BorderAgent>().mCounters.mMgmtPendingGets++;
+        break;
+
+    case kUriCommissionerGet:
+        response = Get<NetworkData::Leader>().ProcessCommissionerGetRequest(aMessage);
+        break;
+
+    default:
         break;
     }
 
+    VerifyOrExit(response != nullptr, error = kErrorParse);
+
+    SuccessOrExit(error = SendMessage(*response));
+
+    LogInfo("Sent %s response to non-active commissioner", PathForUri(aUri));
+
 exit:
-    return;
+    LogWarnOnError(error, "send Active/Pending/CommissionerGet response");
+    FreeMessageOnError(response, error);
 }
 
-void BorderAgent::HandleEphemeralKeyTimeout(void)
+void BorderAgent::CoapDtlsSession::HandleTimer(Timer &aTimer)
 {
-    LogInfo("Ephemeral key timed out");
-    ClearEphemeralKey();
+    static_cast<CoapDtlsSession *>(static_cast<TimerMilliContext &>(aTimer).GetContext())->HandleTimer();
 }
 
-void BorderAgent::InvokeEphemeralKeyCallback(void) { mEphemeralKeyCallback.InvokeIfSet(); }
-
-void BorderAgent::RestartAfterRemovingEphemeralKey(void)
+void BorderAgent::CoapDtlsSession::HandleTimer(void)
 {
-    LogInfo("Removing ephemeral key and restarting agent");
-
-    Stop();
-    IgnoreError(Start(mOldUdpPort));
+    if (IsConnected())
+    {
+        LogInfo("Session timed out - disconnecting");
+        Disconnect();
+    }
 }
 
-void BorderAgent::HandleSecureAgentStopped(void *aContext)
+//----------------------------------------------------------------------------------------------------------------------
+// `BorderAgent::CoapDtlsSession::ForwardContext`
+
+BorderAgent::CoapDtlsSession::ForwardContext::ForwardContext(CoapDtlsSession     &aSession,
+                                                             const Coap::Message &aMessage,
+                                                             bool                 aPetition,
+                                                             bool                 aSeparate)
+    : mSession(aSession)
+    , mMessageId(aMessage.GetMessageId())
+    , mPetition(aPetition)
+    , mSeparate(aSeparate)
+    , mTokenLength(aMessage.GetTokenLength())
+    , mType(aMessage.GetType())
 {
-    reinterpret_cast<BorderAgent *>(aContext)->HandleSecureAgentStopped();
+    memcpy(mToken, aMessage.GetToken(), mTokenLength);
 }
 
-void BorderAgent::HandleSecureAgentStopped(void)
+Error BorderAgent::CoapDtlsSession::ForwardContext::ToHeader(Coap::Message &aMessage, uint8_t aCode) const
 {
-    LogInfo("Reached max allowed connection attempts with ephemeral key");
-    RestartAfterRemovingEphemeralKey();
-}
+    if ((mType == Coap::kTypeNonConfirmable) || mSeparate)
+    {
+        aMessage.Init(Coap::kTypeNonConfirmable, static_cast<Coap::Code>(aCode));
+    }
+    else
+    {
+        aMessage.Init(Coap::kTypeAck, static_cast<Coap::Code>(aCode));
+    }
 
-#endif // OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
+    if (!mSeparate)
+    {
+        aMessage.SetMessageId(mMessageId);
+    }
+
+    return aMessage.SetToken(mToken, mTokenLength);
+}
 
 } // namespace MeshCoP
 } // namespace ot

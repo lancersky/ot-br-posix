@@ -35,18 +35,7 @@
 
 #if OPENTHREAD_CONFIG_DNSSD_SERVER_ENABLE
 
-#include <openthread/platform/dns.h>
-
-#include "common/array.hpp"
-#include "common/as_core_type.hpp"
-#include "common/code_utils.hpp"
-#include "common/debug.hpp"
-#include "common/locator_getters.hpp"
-#include "common/log.hpp"
-#include "common/string.hpp"
 #include "instance/instance.hpp"
-#include "net/srp_server.hpp"
-#include "net/udp6.hpp"
 
 namespace ot {
 namespace Dns {
@@ -63,7 +52,10 @@ const char *Server::kBlockedDomains[] = {"ipv4only.arpa."};
 
 Server::Server(Instance &aInstance)
     : InstanceLocator(aInstance)
-    , mSocket(aInstance)
+    , mSocket(aInstance, *this)
+#if OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
+    , mDiscoveryProxy(aInstance)
+#endif
 #if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
     , mEnableUpstreamQuery(false)
 #endif
@@ -79,14 +71,18 @@ Error Server::Start(void)
 
     VerifyOrExit(!IsRunning());
 
-    SuccessOrExit(error = mSocket.Open(&Server::HandleUdpReceive, this));
-    SuccessOrExit(error = mSocket.Bind(kPort, kBindUnspecifiedNetif ? Ip6::kNetifUnspecified : Ip6::kNetifThread));
+    SuccessOrExit(error = mSocket.Open(kBindUnspecifiedNetif ? Ip6::kNetifUnspecified : Ip6::kNetifThreadInternal));
+    SuccessOrExit(error = mSocket.Bind(kPort));
 
 #if OPENTHREAD_CONFIG_SRP_SERVER_ENABLE
     Get<Srp::Server>().HandleDnssdServerStateChange();
 #endif
 
     LogInfo("Started");
+
+#if OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
+    mDiscoveryProxy.UpdateState();
+#endif
 
 exit:
     if (error != kErrorNone)
@@ -103,6 +99,10 @@ void Server::Stop(void)
     {
         Finalize(query, Header::kResponseServerFailure);
     }
+
+#if OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
+    mDiscoveryProxy.Stop();
+#endif
 
 #if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
     for (UpstreamQueryTransaction &txn : mUpstreamQueryTransactions)
@@ -122,11 +122,6 @@ void Server::Stop(void)
 #if OPENTHREAD_CONFIG_SRP_SERVER_ENABLE
     Get<Srp::Server>().HandleDnssdServerStateChange();
 #endif
-}
-
-void Server::HandleUdpReceive(void *aContext, otMessage *aMessage, const otMessageInfo *aMessageInfo)
-{
-    static_cast<Server *>(aContext)->HandleUdpReceive(AsCoreType(aMessage), AsCoreType(aMessageInfo));
 }
 
 void Server::HandleUdpReceive(Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
@@ -157,7 +152,8 @@ exit:
 
 void Server::ProcessQuery(Request &aRequest)
 {
-    ResponseCode rcode = Header::kResponseSuccess;
+    ResponseCode rcode         = Header::kResponseSuccess;
+    bool         shouldRespond = true;
     Response     response(GetInstance());
 
 #if OPENTHREAD_CONFIG_DNS_UPSTREAM_QUERY_ENABLE
@@ -187,7 +183,7 @@ void Server::ProcessQuery(Request &aRequest)
     SuccessOrExit(rcode);
 #endif
 
-    SuccessOrExit(rcode = aRequest.ParseQuestions(mTestMode));
+    SuccessOrExit(rcode = aRequest.ParseQuestions(mTestMode, shouldRespond));
     SuccessOrExit(rcode = response.AddQuestionsFrom(aRequest));
 
 #if OT_SHOULD_LOG_AT(OT_LOG_LEVEL_INFO)
@@ -219,7 +215,10 @@ exit:
         response.SetResponseCode(rcode);
     }
 
-    response.Send(*aRequest.mMessageInfo);
+    if (shouldRespond)
+    {
+        response.Send(*aRequest.mMessageInfo);
+    }
 }
 
 Server::Response::Response(Instance &aInstance)
@@ -290,7 +289,7 @@ exit:
     return;
 }
 
-Server::ResponseCode Server::Request::ParseQuestions(uint8_t aTestMode)
+Server::ResponseCode Server::Request::ParseQuestions(uint8_t aTestMode, bool &aShouldRespond)
 {
     // Parse header and questions from a `Request` query message and
     // determine the `QueryType`.
@@ -299,6 +298,8 @@ Server::ResponseCode Server::Request::ParseQuestions(uint8_t aTestMode)
     uint16_t     offset        = sizeof(Header);
     uint16_t     questionCount = mHeader.GetQuestionCount();
     Question     question;
+
+    aShouldRespond = true;
 
     VerifyOrExit(mHeader.GetQueryType() == Header::kQueryTypeStandard, rcode = Header::kResponseNotImplemented);
     VerifyOrExit(!mHeader.IsTruncationFlagSet());
@@ -323,13 +324,17 @@ Server::ResponseCode Server::Request::ParseQuestions(uint8_t aTestMode)
     case ResourceRecord::kTypeAaaa:
         mType = kAaaaQuery;
         break;
+    case ResourceRecord::kTypeA:
+        mType = kAQuery;
+        break;
     default:
         ExitNow(rcode = Header::kResponseNotImplemented);
     }
 
     if (questionCount > 1)
     {
-        VerifyOrExit(!(aTestMode & kTestModeSingleQuestionOnly));
+        VerifyOrExit(!(aTestMode & kTestModeRejectMultiQuestionQuery));
+        VerifyOrExit(!(aTestMode & kTestModeIgnoreMultiQuestionQuery), aShouldRespond = false);
 
         VerifyOrExit(questionCount == 2);
 
@@ -434,6 +439,7 @@ Error Server::Response::ParseQueryName(void)
         break;
 
     case kAaaaQuery:
+    case kAQuery:
         mOffsets.mHostName = sizeof(Header);
         break;
     }
@@ -566,37 +572,82 @@ Error Server::Response::AppendHostAddresses(const Srp::Server::Host &aHost)
     addrs = aHost.GetAddresses(addrsLength);
     ttl   = TimeMilli::MsecToSec(aHost.GetExpireTime() - TimerMilli::GetNow());
 
-    return AppendHostAddresses(addrs, addrsLength, ttl);
+    return AppendHostAddresses(kIp6AddrType, addrs, addrsLength, ttl);
 }
 #endif
 
-Error Server::Response::AppendHostAddresses(const HostInfo &aHostInfo)
+Error Server::Response::AppendHostAddresses(AddrType aAddrType, const HostInfo &aHostInfo)
 {
-    return AppendHostAddresses(AsCoreTypePtr(aHostInfo.mAddresses), aHostInfo.mAddressNum, aHostInfo.mTtl);
+    return AppendHostAddresses(aAddrType, AsCoreTypePtr(aHostInfo.mAddresses), aHostInfo.mAddressNum, aHostInfo.mTtl);
 }
 
 Error Server::Response::AppendHostAddresses(const ServiceInstanceInfo &aInstanceInfo)
 {
-    return AppendHostAddresses(AsCoreTypePtr(aInstanceInfo.mAddresses), aInstanceInfo.mAddressNum, aInstanceInfo.mTtl);
+    return AppendHostAddresses(kIp6AddrType, AsCoreTypePtr(aInstanceInfo.mAddresses), aInstanceInfo.mAddressNum,
+                               aInstanceInfo.mTtl);
 }
 
-Error Server::Response::AppendHostAddresses(const Ip6::Address *aAddrs, uint16_t aAddrsLength, uint32_t aTtl)
+Error Server::Response::AppendHostAddresses(AddrType            aAddrType,
+                                            const Ip6::Address *aAddrs,
+                                            uint16_t            aAddrsLength,
+                                            uint32_t            aTtl)
 {
     Error error = kErrorNone;
 
     for (uint16_t index = 0; index < aAddrsLength; index++)
     {
-        AaaaRecord aaaaRecord;
+        const Ip6::Address &address = aAddrs[index];
 
-        aaaaRecord.Init();
-        aaaaRecord.SetTtl(aTtl);
-        aaaaRecord.SetAddress(aAddrs[index]);
+        switch (aAddrType)
+        {
+        case kIp6AddrType:
+            SuccessOrExit(error = AppendAaaaRecord(address, aTtl));
+            break;
 
-        SuccessOrExit(error = Name::AppendPointerLabel(mOffsets.mHostName, *mMessage));
-        SuccessOrExit(error = mMessage->Append(aaaaRecord));
-
-        IncResourceRecordCount();
+        case kIp4AddrType:
+            SuccessOrExit(error = AppendARecord(address, aTtl));
+            break;
+        }
     }
+
+exit:
+    return error;
+}
+
+Error Server::Response::AppendAaaaRecord(const Ip6::Address &aAddress, uint32_t aTtl)
+{
+    Error      error = kErrorNone;
+    AaaaRecord aaaaRecord;
+
+    VerifyOrExit(!aAddress.IsIp4Mapped());
+
+    aaaaRecord.Init();
+    aaaaRecord.SetTtl(aTtl);
+    aaaaRecord.SetAddress(aAddress);
+
+    SuccessOrExit(error = Name::AppendPointerLabel(mOffsets.mHostName, *mMessage));
+    SuccessOrExit(error = mMessage->Append(aaaaRecord));
+    IncResourceRecordCount();
+
+exit:
+    return error;
+}
+
+Error Server::Response::AppendARecord(const Ip6::Address &aAddress, uint32_t aTtl)
+{
+    Error        error = kErrorNone;
+    ARecord      aRecord;
+    Ip4::Address ip4Address;
+
+    SuccessOrExit(ip4Address.ExtractFromIp4MappedIp6Address(aAddress));
+
+    aRecord.Init();
+    aRecord.SetTtl(aTtl);
+    aRecord.SetAddress(ip4Address);
+
+    SuccessOrExit(error = Name::AppendPointerLabel(mOffsets.mHostName, *mMessage));
+    SuccessOrExit(error = mMessage->Append(aRecord));
+    IncResourceRecordCount();
 
 exit:
     return error;
@@ -683,13 +734,19 @@ const char *Server::Response::QueryTypeToString(QueryType aType)
         "TXT",       // (2) kTxtQuery
         "SRV & TXT", // (3) kSrvTxtQuery
         "AAAA",      // (4) kAaaaQuery
+        "A",         // (5) kAQuery
     };
 
-    static_assert(0 == kPtrQuery, "kPtrQuery value is incorrect");
-    static_assert(1 == kSrvQuery, "kSrvQuery value is incorrect");
-    static_assert(2 == kTxtQuery, "kTxtQuery value is incorrect");
-    static_assert(3 == kSrvTxtQuery, "kSrvTxtQuery value is incorrect");
-    static_assert(4 == kAaaaQuery, "kAaaaQuery value is incorrect");
+    struct EumCheck
+    {
+        InitEnumValidatorCounter();
+        ValidateNextEnum(kPtrQuery);
+        ValidateNextEnum(kSrvQuery);
+        ValidateNextEnum(kTxtQuery);
+        ValidateNextEnum(kSrvTxtQuery);
+        ValidateNextEnum(kAaaaQuery);
+        ValidateNextEnum(kAQuery);
+    };
 
     return kTypeNames[aType];
 }
@@ -716,11 +773,12 @@ Error Server::Response::ResolveBySrp(void)
             continue;
         }
 
-        if (mType == kAaaaQuery)
+        if ((mType == kAaaaQuery) || (mType == kAQuery))
         {
             if (QueryNameMatches(host.GetFullName()))
             {
-                error = AppendHostAddresses(host);
+                mSection = (mType == kAaaaQuery) ? kAnswerSection : kAdditionalDataSection;
+                error    = AppendHostAddresses(host);
                 ExitNow();
             }
 
@@ -915,9 +973,12 @@ void Server::ResolveByProxy(Response &aResponse, const Ip6::MessageInfo &aMessag
 {
     ProxyQuery    *query;
     ProxyQueryInfo info;
-    Name::Buffer   name;
 
+#if OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
+    VerifyOrExit(mQuerySubscribe.IsSet() || mDiscoveryProxy.IsRunning());
+#else
     VerifyOrExit(mQuerySubscribe.IsSet());
+#endif
 
     // We try to convert `aResponse.mMessage` to a `ProxyQuery` by
     // appending `ProxyQueryInfo` to it.
@@ -926,6 +987,10 @@ void Server::ResolveByProxy(Response &aResponse, const Ip6::MessageInfo &aMessag
     info.mMessageInfo = aMessageInfo;
     info.mExpireTime  = TimerMilli::GetNow() + kQueryTimeout;
     info.mOffsets     = aResponse.mOffsets;
+
+#if OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
+    info.mAction = kNoAction;
+#endif
 
     if (aResponse.mMessage->Append(info) != kErrorNone)
     {
@@ -943,8 +1008,21 @@ void Server::ResolveByProxy(Response &aResponse, const Ip6::MessageInfo &aMessag
 
     mTimer.FireAtIfEarlier(info.mExpireTime);
 
-    ReadQueryName(*query, name);
-    mQuerySubscribe.Invoke(name);
+#if OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
+    if (mQuerySubscribe.IsSet())
+#endif
+    {
+        Name::Buffer name;
+
+        ReadQueryName(*query, name);
+        mQuerySubscribe.Invoke(name);
+    }
+#if OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
+    else
+    {
+        mDiscoveryProxy.Resolve(*query, info);
+    }
+#endif
 
 exit:
     return;
@@ -964,16 +1042,89 @@ bool Server::QueryNameMatches(const Message &aQuery, const char *aName)
     return (Name::CompareName(aQuery, offset, aName) == kErrorNone);
 }
 
-void Server::ProxyQueryInfo::ReadFrom(const ProxyQuery &aQuery)
+void Server::ReadQueryInstanceName(const ProxyQuery &aQuery, const ProxyQueryInfo &aInfo, Name::Buffer &aName)
 {
-    SuccessOrAssert(aQuery.Read(aQuery.GetLength() - sizeof(ProxyQueryInfo), *this));
+    uint16_t offset = aInfo.mOffsets.mInstanceName;
+
+    IgnoreError(Name::ReadName(aQuery, offset, aName, sizeof(aName)));
 }
 
-void Server::ProxyQueryInfo::RemoveFrom(ProxyQuery &aQuery) const { aQuery.RemoveFooter(sizeof(ProxyQueryInfo)); }
-
-void Server::ProxyQueryInfo::UpdateIn(ProxyQuery &aQuery) const
+void Server::ReadQueryInstanceName(const ProxyQuery     &aQuery,
+                                   const ProxyQueryInfo &aInfo,
+                                   Name::LabelBuffer    &aInstanceLabel,
+                                   Name::Buffer         &aServiceType)
 {
-    aQuery.Write(aQuery.GetLength() - sizeof(ProxyQueryInfo), *this);
+    // Reads the service instance label and service type with domain
+    // name stripped.
+
+    uint16_t offset      = aInfo.mOffsets.mInstanceName;
+    uint8_t  labelLength = sizeof(aInstanceLabel);
+
+    IgnoreError(Dns::Name::ReadLabel(aQuery, offset, aInstanceLabel, labelLength));
+    IgnoreError(Dns::Name::ReadName(aQuery, offset, aServiceType));
+    IgnoreError(StripDomainName(aServiceType));
+}
+
+bool Server::QueryInstanceNameMatches(const ProxyQuery &aQuery, const ProxyQueryInfo &aInfo, const char *aName)
+{
+    uint16_t offset = aInfo.mOffsets.mInstanceName;
+
+    return (Name::CompareName(aQuery, offset, aName) == kErrorNone);
+}
+
+void Server::ReadQueryHostName(const ProxyQuery &aQuery, const ProxyQueryInfo &aInfo, Name::Buffer &aName)
+{
+    uint16_t offset = aInfo.mOffsets.mHostName;
+
+    IgnoreError(Name::ReadName(aQuery, offset, aName, sizeof(aName)));
+}
+
+bool Server::QueryHostNameMatches(const ProxyQuery &aQuery, const ProxyQueryInfo &aInfo, const char *aName)
+{
+    uint16_t offset = aInfo.mOffsets.mHostName;
+
+    return (Name::CompareName(aQuery, offset, aName) == kErrorNone);
+}
+
+Error Server::StripDomainName(Name::Buffer &aName)
+{
+    // In-place removes the domain name from `aName`.
+
+    return Name::StripName(aName, kDefaultDomainName);
+}
+
+Error Server::StripDomainName(const char *aFullName, Name::Buffer &aLabels)
+{
+    // Remove the domain name from `aFullName` and copies
+    // the result into `aLabels`.
+
+    return Name::ExtractLabels(aFullName, kDefaultDomainName, aLabels, sizeof(aLabels));
+}
+
+void Server::ConstructFullName(const char *aLabels, Name::Buffer &aFullName)
+{
+    // Construct a full name by appending the default domain name
+    // to `aLabels`.
+
+    StringWriter fullName(aFullName, sizeof(aFullName));
+
+    fullName.Append("%s.%s", aLabels, kDefaultDomainName);
+}
+
+void Server::ConstructFullInstanceName(const char *aInstanceLabel, const char *aServiceType, Name::Buffer &aFullName)
+{
+    StringWriter fullName(aFullName, sizeof(aFullName));
+
+    fullName.Append("%s.%s.%s", aInstanceLabel, aServiceType, kDefaultDomainName);
+}
+
+void Server::ConstructFullServiceSubTypeName(const char   *aServiceType,
+                                             const char   *aSubTypeLabel,
+                                             Name::Buffer &aFullName)
+{
+    StringWriter fullName(aFullName, sizeof(aFullName));
+
+    fullName.Append("%s._sub.%s.%s", aSubTypeLabel, aServiceType, kDefaultDomainName);
 }
 
 Error Server::Response::ExtractServiceInstanceLabel(const char *aInstanceName, Name::LabelBuffer &aLabel)
@@ -987,15 +1138,22 @@ Error Server::Response::ExtractServiceInstanceLabel(const char *aInstanceName, N
     return Name::ExtractLabels(aInstanceName, serviceName, aLabel);
 }
 
-void Server::RemoveQueryAndPrepareResponse(ProxyQuery &aQuery, const ProxyQueryInfo &aInfo, Response &aResponse)
+void Server::RemoveQueryAndPrepareResponse(ProxyQuery &aQuery, ProxyQueryInfo &aInfo, Response &aResponse)
 {
-    Name::Buffer name;
+#if OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
+    mDiscoveryProxy.CancelAction(aQuery, aInfo);
+#endif
 
     mProxyQueries.Dequeue(aQuery);
     aInfo.RemoveFrom(aQuery);
 
-    ReadQueryName(aQuery, name);
-    mQueryUnsubscribe.InvokeIfSet(name);
+    if (mQueryUnsubscribe.IsSet())
+    {
+        Name::Buffer name;
+
+        ReadQueryName(aQuery, name);
+        mQueryUnsubscribe.Invoke(name);
+    }
 
     aResponse.InitFrom(aQuery, aInfo);
 }
@@ -1058,9 +1216,14 @@ exit:
 
 void Server::Response::Answer(const HostInfo &aHostInfo, const Ip6::MessageInfo &aMessageInfo)
 {
+    // Caller already ensures that `mType` is either `kAaaaQuery` or
+    // `kAQuery`.
+
+    AddrType addrType = (mType == kAaaaQuery) ? kIp6AddrType : kIp4AddrType;
+
     mSection = kAnswerSection;
 
-    if (AppendHostAddresses(aHostInfo) != kErrorNone)
+    if (AppendHostAddresses(addrType, aHostInfo) != kErrorNone)
     {
         SetResponseCode(Header::kResponseServerFailure);
     }
@@ -1105,6 +1268,7 @@ void Server::HandleDiscoveredServiceInstance(const char *aServiceFullName, const
             break;
 
         case kAaaaQuery:
+        case kAQuery:
             break;
         }
 
@@ -1128,12 +1292,22 @@ void Server::HandleDiscoveredHost(const char *aHostFullName, const HostInfo &aHo
 
         info.ReadFrom(query);
 
-        if ((info.mType == kAaaaQuery) && QueryNameMatches(query, aHostFullName))
+        switch (info.mType)
         {
-            Response response(GetInstance());
+        case kAaaaQuery:
+        case kAQuery:
+            if (QueryNameMatches(query, aHostFullName))
+            {
+                Response response(GetInstance());
 
-            RemoveQueryAndPrepareResponse(query, info, response);
-            response.Answer(aHostInfo, info.mMessageInfo);
+                RemoveQueryAndPrepareResponse(query, info, response);
+                response.Answer(aHostInfo, info.mMessageInfo);
+            }
+
+            break;
+
+        default:
+            break;
         }
     }
 }
@@ -1168,6 +1342,7 @@ Server::DnsQueryType Server::GetQueryTypeAndName(const otDnssdQuery *aQuery, Dns
         break;
 
     case kAaaaQuery:
+    case kAQuery:
         type = kDnsQueryResolveHost;
         break;
     }
@@ -1177,8 +1352,7 @@ Server::DnsQueryType Server::GetQueryTypeAndName(const otDnssdQuery *aQuery, Dns
 
 void Server::HandleTimer(void)
 {
-    TimeMilli now        = TimerMilli::GetNow();
-    TimeMilli nextExpire = now.GetDistantFuture();
+    NextFireTime nextExpire;
 
     for (ProxyQuery &query : mProxyQueries)
     {
@@ -1186,13 +1360,13 @@ void Server::HandleTimer(void)
 
         info.ReadFrom(query);
 
-        if (info.mExpireTime <= now)
+        if (info.mExpireTime <= nextExpire.GetNow())
         {
             Finalize(query, Header::kResponseSuccess);
         }
         else
         {
-            nextExpire = Min(nextExpire, info.mExpireTime);
+            nextExpire.UpdateIfEarlier(info.mExpireTime);
         }
     }
 
@@ -1204,21 +1378,18 @@ void Server::HandleTimer(void)
             continue;
         }
 
-        if (query.GetExpireTime() <= now)
+        if (query.GetExpireTime() <= nextExpire.GetNow())
         {
             otPlatDnsCancelUpstreamQuery(&GetInstance(), &query);
         }
         else
         {
-            nextExpire = Min(nextExpire, query.GetExpireTime());
+            nextExpire.UpdateIfEarlier(query.GetExpireTime());
         }
     }
 #endif
 
-    if (nextExpire != now.GetDistantFuture())
-    {
-        mTimer.FireAtIfEarlier(nextExpire);
-    }
+    mTimer.FireAtIfEarlier(nextExpire);
 }
 
 void Server::Finalize(ProxyQuery &aQuery, ResponseCode aResponseCode)
@@ -1285,6 +1456,807 @@ void Server::ResetUpstreamQueryTransaction(UpstreamQueryTransaction &aTxn, Error
     aTxn.Reset();
 }
 #endif
+
+#if OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
+
+Server::DiscoveryProxy::DiscoveryProxy(Instance &aInstance)
+    : InstanceLocator(aInstance)
+    , mIsRunning(false)
+{
+}
+
+void Server::DiscoveryProxy::UpdateState(void)
+{
+    if (Get<Server>().IsRunning() && Get<Dnssd>().IsReady() && Get<BorderRouter::InfraIf>().IsRunning())
+    {
+        Start();
+    }
+    else
+    {
+        Stop();
+    }
+}
+
+void Server::DiscoveryProxy::Start(void)
+{
+    VerifyOrExit(!mIsRunning);
+    mIsRunning = true;
+    LogInfo("Started discovery proxy");
+
+exit:
+    return;
+}
+
+void Server::DiscoveryProxy::Stop(void)
+{
+    VerifyOrExit(mIsRunning);
+
+    for (ProxyQuery &query : Get<Server>().mProxyQueries)
+    {
+        Get<Server>().Finalize(query, Header::kResponseSuccess);
+    }
+
+    mIsRunning = false;
+    LogInfo("Stopped discovery proxy");
+
+exit:
+    return;
+}
+
+void Server::DiscoveryProxy::Resolve(ProxyQuery &aQuery, ProxyQueryInfo &aInfo)
+{
+    ProxyAction action = kNoAction;
+
+    switch (aInfo.mType)
+    {
+    case kPtrQuery:
+        action = kBrowsing;
+        break;
+
+    case kSrvQuery:
+    case kSrvTxtQuery:
+        action = kResolvingSrv;
+        break;
+
+    case kTxtQuery:
+        action = kResolvingTxt;
+        break;
+
+    case kAaaaQuery:
+        action = kResolvingIp6Address;
+        break;
+    case kAQuery:
+        action = kResolvingIp4Address;
+        break;
+    }
+
+    Perform(action, aQuery, aInfo);
+}
+
+void Server::DiscoveryProxy::Perform(ProxyAction aAction, ProxyQuery &aQuery, ProxyQueryInfo &aInfo)
+{
+    bool         shouldStart;
+    Name::Buffer name;
+
+    VerifyOrExit(aAction != kNoAction);
+
+    // The order of the steps below is crucial. First, we read the
+    // name associated with the action. Then we check if another
+    // query has an active browser/resolver for the same name. This
+    // helps us determine if a new browser/resolver is needed. Then,
+    // we update the `ProxyQueryInfo` within `aQuery` to reflect the
+    // `aAction` being performed. Finally, if necessary, we start the
+    // proper browser/resolver on DNS-SD/mDNS. Placing this last
+    // ensures correct processing even if a DNS-SD/mDNS callback is
+    // invoked immediately.
+
+    ReadNameFor(aAction, aQuery, aInfo, name);
+
+    shouldStart = !HasActive(aAction, name);
+
+    aInfo.mAction = aAction;
+    aInfo.UpdateIn(aQuery);
+
+    VerifyOrExit(shouldStart);
+    UpdateProxy(kStart, aAction, aQuery, aInfo, name);
+
+exit:
+    return;
+}
+
+void Server::DiscoveryProxy::ReadNameFor(ProxyAction     aAction,
+                                         ProxyQuery     &aQuery,
+                                         ProxyQueryInfo &aInfo,
+                                         Name::Buffer   &aName) const
+{
+    // Read the name corresponding to `aAction` from `aQuery`.
+
+    switch (aAction)
+    {
+    case kNoAction:
+        break;
+    case kBrowsing:
+        ReadQueryName(aQuery, aName);
+        break;
+    case kResolvingSrv:
+    case kResolvingTxt:
+        ReadQueryInstanceName(aQuery, aInfo, aName);
+        break;
+    case kResolvingIp6Address:
+    case kResolvingIp4Address:
+        ReadQueryHostName(aQuery, aInfo, aName);
+        break;
+    }
+}
+
+void Server::DiscoveryProxy::CancelAction(ProxyQuery &aQuery, ProxyQueryInfo &aInfo)
+{
+    // Cancel the current action for a given `aQuery`, then
+    // determine if we need to stop any browser/resolver
+    // on infrastructure.
+
+    ProxyAction  action = aInfo.mAction;
+    Name::Buffer name;
+
+    VerifyOrExit(mIsRunning);
+    VerifyOrExit(action != kNoAction);
+
+    // We first update the `aInfo` on `aQuery` before calling
+    // `HasActive()`. This ensures that the current query is not
+    // taken into account when we try to determine if any query
+    // is waiting for same `aAction` browser/resolver.
+
+    ReadNameFor(action, aQuery, aInfo, name);
+
+    aInfo.mAction = kNoAction;
+    aInfo.UpdateIn(aQuery);
+
+    VerifyOrExit(!HasActive(action, name));
+    UpdateProxy(kStop, action, aQuery, aInfo, name);
+
+exit:
+    return;
+}
+
+void Server::DiscoveryProxy::UpdateProxy(Command               aCommand,
+                                         ProxyAction           aAction,
+                                         const ProxyQuery     &aQuery,
+                                         const ProxyQueryInfo &aInfo,
+                                         Name::Buffer         &aName)
+{
+    // Start or stop browser/resolver corresponding to `aAction`.
+    // `aName` may be changed.
+
+    switch (aAction)
+    {
+    case kNoAction:
+        break;
+    case kBrowsing:
+        StartOrStopBrowser(aCommand, aName);
+        break;
+    case kResolvingSrv:
+        StartOrStopSrvResolver(aCommand, aQuery, aInfo);
+        break;
+    case kResolvingTxt:
+        StartOrStopTxtResolver(aCommand, aQuery, aInfo);
+        break;
+    case kResolvingIp6Address:
+        StartOrStopIp6Resolver(aCommand, aName);
+        break;
+    case kResolvingIp4Address:
+        StartOrStopIp4Resolver(aCommand, aName);
+        break;
+    }
+}
+
+void Server::DiscoveryProxy::StartOrStopBrowser(Command aCommand, Name::Buffer &aServiceName)
+{
+    // Start or stop a service browser for a given service type
+    // or sub-type.
+
+    static const char kFullSubLabel[] = "._sub.";
+
+    Dnssd::Browser browser;
+    char          *ptr;
+
+    browser.Clear();
+
+    IgnoreError(StripDomainName(aServiceName));
+
+    // Check if the service name is a sub-type with name
+    // format: "<sub-label>._sub.<service-labels>.
+
+    ptr = AsNonConst(StringFind(aServiceName, kFullSubLabel, kStringCaseInsensitiveMatch));
+
+    if (ptr != nullptr)
+    {
+        *ptr = kNullChar;
+        ptr += sizeof(kFullSubLabel) - 1;
+
+        browser.mServiceType  = ptr;
+        browser.mSubTypeLabel = aServiceName;
+    }
+    else
+    {
+        browser.mServiceType  = aServiceName;
+        browser.mSubTypeLabel = nullptr;
+    }
+
+    browser.mInfraIfIndex = Get<BorderRouter::InfraIf>().GetIfIndex();
+    browser.mCallback     = HandleBrowseResult;
+
+    switch (aCommand)
+    {
+    case kStart:
+        Get<Dnssd>().StartBrowser(browser);
+        break;
+
+    case kStop:
+        Get<Dnssd>().StopBrowser(browser);
+        break;
+    }
+}
+
+void Server::DiscoveryProxy::StartOrStopSrvResolver(Command               aCommand,
+                                                    const ProxyQuery     &aQuery,
+                                                    const ProxyQueryInfo &aInfo)
+{
+    // Start or stop an SRV record resolver for a given query.
+
+    Dnssd::SrvResolver resolver;
+    Name::LabelBuffer  instanceLabel;
+    Name::Buffer       serviceType;
+
+    ReadQueryInstanceName(aQuery, aInfo, instanceLabel, serviceType);
+
+    resolver.Clear();
+
+    resolver.mServiceInstance = instanceLabel;
+    resolver.mServiceType     = serviceType;
+    resolver.mInfraIfIndex    = Get<BorderRouter::InfraIf>().GetIfIndex();
+    resolver.mCallback        = HandleSrvResult;
+
+    switch (aCommand)
+    {
+    case kStart:
+        Get<Dnssd>().StartSrvResolver(resolver);
+        break;
+
+    case kStop:
+        Get<Dnssd>().StopSrvResolver(resolver);
+        break;
+    }
+}
+
+void Server::DiscoveryProxy::StartOrStopTxtResolver(Command               aCommand,
+                                                    const ProxyQuery     &aQuery,
+                                                    const ProxyQueryInfo &aInfo)
+{
+    // Start or stop a TXT record resolver for a given query.
+
+    Dnssd::TxtResolver resolver;
+    Name::LabelBuffer  instanceLabel;
+    Name::Buffer       serviceType;
+
+    ReadQueryInstanceName(aQuery, aInfo, instanceLabel, serviceType);
+
+    resolver.Clear();
+
+    resolver.mServiceInstance = instanceLabel;
+    resolver.mServiceType     = serviceType;
+    resolver.mInfraIfIndex    = Get<BorderRouter::InfraIf>().GetIfIndex();
+    resolver.mCallback        = HandleTxtResult;
+
+    switch (aCommand)
+    {
+    case kStart:
+        Get<Dnssd>().StartTxtResolver(resolver);
+        break;
+
+    case kStop:
+        Get<Dnssd>().StopTxtResolver(resolver);
+        break;
+    }
+}
+
+void Server::DiscoveryProxy::StartOrStopIp6Resolver(Command aCommand, Name::Buffer &aHostName)
+{
+    // Start or stop an IPv6 address resolver for a given host name.
+
+    Dnssd::AddressResolver resolver;
+
+    IgnoreError(StripDomainName(aHostName));
+
+    resolver.mHostName     = aHostName;
+    resolver.mInfraIfIndex = Get<BorderRouter::InfraIf>().GetIfIndex();
+    resolver.mCallback     = HandleIp6AddressResult;
+
+    switch (aCommand)
+    {
+    case kStart:
+        Get<Dnssd>().StartIp6AddressResolver(resolver);
+        break;
+
+    case kStop:
+        Get<Dnssd>().StopIp6AddressResolver(resolver);
+        break;
+    }
+}
+
+void Server::DiscoveryProxy::StartOrStopIp4Resolver(Command aCommand, Name::Buffer &aHostName)
+{
+    // Start or stop an IPv4 address resolver for a given host name.
+
+    Dnssd::AddressResolver resolver;
+
+    IgnoreError(StripDomainName(aHostName));
+
+    resolver.mHostName     = aHostName;
+    resolver.mInfraIfIndex = Get<BorderRouter::InfraIf>().GetIfIndex();
+    resolver.mCallback     = HandleIp4AddressResult;
+
+    switch (aCommand)
+    {
+    case kStart:
+        Get<Dnssd>().StartIp4AddressResolver(resolver);
+        break;
+
+    case kStop:
+        Get<Dnssd>().StopIp4AddressResolver(resolver);
+        break;
+    }
+}
+
+bool Server::DiscoveryProxy::QueryMatches(const ProxyQuery     &aQuery,
+                                          const ProxyQueryInfo &aInfo,
+                                          ProxyAction           aAction,
+                                          const Name::Buffer   &aName) const
+{
+    // Check whether `aQuery` is performing `aAction` and
+    // its name matches `aName`.
+
+    bool matches = false;
+
+    VerifyOrExit(aInfo.mAction == aAction);
+
+    switch (aAction)
+    {
+    case kBrowsing:
+        VerifyOrExit(QueryNameMatches(aQuery, aName));
+        break;
+    case kResolvingSrv:
+    case kResolvingTxt:
+        VerifyOrExit(QueryInstanceNameMatches(aQuery, aInfo, aName));
+        break;
+    case kResolvingIp6Address:
+    case kResolvingIp4Address:
+        VerifyOrExit(QueryHostNameMatches(aQuery, aInfo, aName));
+        break;
+    case kNoAction:
+        ExitNow();
+    }
+
+    matches = true;
+
+exit:
+    return matches;
+}
+
+bool Server::DiscoveryProxy::HasActive(ProxyAction aAction, const Name::Buffer &aName) const
+{
+    // Determine whether or not we have an active browser/resolver
+    // corresponding to `aAction` for `aName`.
+
+    bool has = false;
+
+    for (const ProxyQuery &query : Get<Server>().mProxyQueries)
+    {
+        ProxyQueryInfo info;
+
+        info.ReadFrom(query);
+
+        if (QueryMatches(query, info, aAction, aName))
+        {
+            has = true;
+            break;
+        }
+    }
+
+    return has;
+}
+
+void Server::DiscoveryProxy::HandleBrowseResult(otInstance *aInstance, const otPlatDnssdBrowseResult *aResult)
+{
+    AsCoreType(aInstance).Get<Server>().mDiscoveryProxy.HandleBrowseResult(*aResult);
+}
+
+void Server::DiscoveryProxy::HandleBrowseResult(const Dnssd::BrowseResult &aResult)
+{
+    Name::Buffer serviceName;
+
+    VerifyOrExit(mIsRunning);
+    VerifyOrExit(aResult.mTtl != 0);
+    VerifyOrExit(aResult.mInfraIfIndex == Get<BorderRouter::InfraIf>().GetIfIndex());
+
+    if (aResult.mSubTypeLabel != nullptr)
+    {
+        ConstructFullServiceSubTypeName(aResult.mServiceType, aResult.mSubTypeLabel, serviceName);
+    }
+    else
+    {
+        ConstructFullName(aResult.mServiceType, serviceName);
+    }
+
+    HandleResult(kBrowsing, serviceName, &Response::AppendPtrRecord, ProxyResult(aResult));
+
+exit:
+    return;
+}
+
+void Server::DiscoveryProxy::HandleSrvResult(otInstance *aInstance, const otPlatDnssdSrvResult *aResult)
+{
+    AsCoreType(aInstance).Get<Server>().mDiscoveryProxy.HandleSrvResult(*aResult);
+}
+
+void Server::DiscoveryProxy::HandleSrvResult(const Dnssd::SrvResult &aResult)
+{
+    Name::Buffer instanceName;
+
+    VerifyOrExit(mIsRunning);
+    VerifyOrExit(aResult.mTtl != 0);
+    VerifyOrExit(aResult.mInfraIfIndex == Get<BorderRouter::InfraIf>().GetIfIndex());
+
+    ConstructFullInstanceName(aResult.mServiceInstance, aResult.mServiceType, instanceName);
+    HandleResult(kResolvingSrv, instanceName, &Response::AppendSrvRecord, ProxyResult(aResult));
+
+exit:
+    return;
+}
+
+void Server::DiscoveryProxy::HandleTxtResult(otInstance *aInstance, const otPlatDnssdTxtResult *aResult)
+{
+    AsCoreType(aInstance).Get<Server>().mDiscoveryProxy.HandleTxtResult(*aResult);
+}
+
+void Server::DiscoveryProxy::HandleTxtResult(const Dnssd::TxtResult &aResult)
+{
+    Name::Buffer instanceName;
+
+    VerifyOrExit(mIsRunning);
+    VerifyOrExit(aResult.mTtl != 0);
+    VerifyOrExit(aResult.mInfraIfIndex == Get<BorderRouter::InfraIf>().GetIfIndex());
+
+    ConstructFullInstanceName(aResult.mServiceInstance, aResult.mServiceType, instanceName);
+    HandleResult(kResolvingTxt, instanceName, &Response::AppendTxtRecord, ProxyResult(aResult));
+
+exit:
+    return;
+}
+
+void Server::DiscoveryProxy::HandleIp6AddressResult(otInstance *aInstance, const otPlatDnssdAddressResult *aResult)
+{
+    AsCoreType(aInstance).Get<Server>().mDiscoveryProxy.HandleIp6AddressResult(*aResult);
+}
+
+void Server::DiscoveryProxy::HandleIp6AddressResult(const Dnssd::AddressResult &aResult)
+{
+    bool         hasValidAddress = false;
+    Name::Buffer fullHostName;
+
+    VerifyOrExit(mIsRunning);
+    VerifyOrExit(aResult.mInfraIfIndex == Get<BorderRouter::InfraIf>().GetIfIndex());
+
+    for (uint16_t index = 0; index < aResult.mAddressesLength; index++)
+    {
+        const Dnssd::AddressAndTtl &entry   = aResult.mAddresses[index];
+        const Ip6::Address         &address = AsCoreType(&entry.mAddress);
+
+        if (entry.mTtl == 0)
+        {
+            continue;
+        }
+
+        if (IsProxyAddressValid(address))
+        {
+            hasValidAddress = true;
+            break;
+        }
+    }
+
+    VerifyOrExit(hasValidAddress);
+
+    ConstructFullName(aResult.mHostName, fullHostName);
+    HandleResult(kResolvingIp6Address, fullHostName, &Response::AppendHostIp6Addresses, ProxyResult(aResult));
+
+exit:
+    return;
+}
+
+void Server::DiscoveryProxy::HandleIp4AddressResult(otInstance *aInstance, const otPlatDnssdAddressResult *aResult)
+{
+    AsCoreType(aInstance).Get<Server>().mDiscoveryProxy.HandleIp4AddressResult(*aResult);
+}
+
+void Server::DiscoveryProxy::HandleIp4AddressResult(const Dnssd::AddressResult &aResult)
+{
+    bool         hasValidAddress = false;
+    Name::Buffer fullHostName;
+
+    VerifyOrExit(mIsRunning);
+    VerifyOrExit(aResult.mInfraIfIndex == Get<BorderRouter::InfraIf>().GetIfIndex());
+
+    for (uint16_t index = 0; index < aResult.mAddressesLength; index++)
+    {
+        const Dnssd::AddressAndTtl &entry   = aResult.mAddresses[index];
+        const Ip6::Address         &address = AsCoreType(&entry.mAddress);
+
+        if (entry.mTtl == 0)
+        {
+            continue;
+        }
+
+        if (address.IsIp4Mapped())
+        {
+            hasValidAddress = true;
+            break;
+        }
+    }
+
+    VerifyOrExit(hasValidAddress);
+
+    ConstructFullName(aResult.mHostName, fullHostName);
+    HandleResult(kResolvingIp4Address, fullHostName, &Response::AppendHostIp4Addresses, ProxyResult(aResult));
+
+exit:
+    return;
+}
+
+void Server::DiscoveryProxy::HandleResult(ProxyAction         aAction,
+                                          const Name::Buffer &aName,
+                                          ResponseAppender    aAppender,
+                                          const ProxyResult  &aResult)
+{
+    // Common method that handles result from DNS-SD/mDNS. It
+    // iterates over all `ProxyQuery` entries and checks if any entry
+    // is waiting for the result of `aAction` for `aName`. Matching
+    // queries are updated using the `aAppender` method pointer,
+    // which appends the corresponding record(s) to the response. We
+    // then determine the next action to be performed for the
+    // `ProxyQuery` or if it can be finalized.
+
+    ProxyQueryList nextActionQueries;
+    ProxyQueryInfo info;
+    ProxyAction    nextAction;
+
+    for (ProxyQuery &query : Get<Server>().mProxyQueries)
+    {
+        Response response(GetInstance());
+        bool     shouldFinalize;
+
+        info.ReadFrom(query);
+
+        if (!QueryMatches(query, info, aAction, aName))
+        {
+            continue;
+        }
+
+        CancelAction(query, info);
+
+        nextAction = kNoAction;
+
+        switch (aAction)
+        {
+        case kBrowsing:
+            nextAction = kResolvingSrv;
+            break;
+        case kResolvingSrv:
+            nextAction = (info.mType == kSrvQuery) ? kResolvingIp6Address : kResolvingTxt;
+            break;
+        case kResolvingTxt:
+            nextAction = (info.mType == kTxtQuery) ? kNoAction : kResolvingIp6Address;
+            break;
+        case kNoAction:
+        case kResolvingIp6Address:
+        case kResolvingIp4Address:
+            break;
+        }
+
+        shouldFinalize = (nextAction == kNoAction);
+
+        if ((Get<Server>().mTestMode & kTestModeEmptyAdditionalSection) &&
+            IsActionForAdditionalSection(nextAction, info.mType))
+        {
+            shouldFinalize = true;
+        }
+
+        Get<Server>().mProxyQueries.Dequeue(query);
+        info.RemoveFrom(query);
+        response.InitFrom(query, info);
+
+        if ((response.*aAppender)(aResult) != kErrorNone)
+        {
+            response.SetResponseCode(Header::kResponseServerFailure);
+            shouldFinalize = true;
+        }
+
+        if (shouldFinalize)
+        {
+            response.Send(info.mMessageInfo);
+            continue;
+        }
+
+        // The `query` is not yet finished and we need to perform
+        // the `nextAction` for it.
+
+        // Reinitialize `response` as a `ProxyQuey` by updating
+        // and appending `info` to it after the newly appended
+        // records from `aResult` and saving the `mHeader`.
+
+        info.mOffsets = response.mOffsets;
+        info.mAction  = nextAction;
+        response.mMessage->Write(0, response.mHeader);
+
+        if (response.mMessage->Append(info) != kErrorNone)
+        {
+            response.SetResponseCode(Header::kResponseServerFailure);
+            response.Send(info.mMessageInfo);
+            continue;
+        }
+
+        // Take back ownership of `response.mMessage` as we still
+        // treat it as a `ProxyQuery`.
+
+        response.mMessage.Release();
+
+        // We place the `query` in a separate list and add it back to
+        // the main `mProxyQueries` list after we are done with the
+        // current iteration. This ensures that other entries in the
+        // `mProxyQueries` list are not updated or removed due to the
+        // DNS-SD platform callback being invoked immediately when we
+        // potentially start a browser or resolver to perform the
+        // `nextAction` for `query`.
+
+        nextActionQueries.Enqueue(query);
+    }
+
+    for (ProxyQuery &query : nextActionQueries)
+    {
+        nextActionQueries.Dequeue(query);
+
+        info.ReadFrom(query);
+
+        nextAction = info.mAction;
+
+        info.mAction = kNoAction;
+        info.UpdateIn(query);
+
+        Get<Server>().mProxyQueries.Enqueue(query);
+        Perform(nextAction, query, info);
+    }
+}
+
+bool Server::DiscoveryProxy::IsActionForAdditionalSection(ProxyAction aAction, QueryType aQueryType)
+{
+    bool isForAddnlSection = false;
+
+    switch (aAction)
+    {
+    case kResolvingSrv:
+        VerifyOrExit((aQueryType == kSrvQuery) || (aQueryType == kSrvTxtQuery));
+        break;
+    case kResolvingTxt:
+        VerifyOrExit((aQueryType == kTxtQuery) || (aQueryType == kSrvTxtQuery));
+        break;
+
+    case kResolvingIp6Address:
+        VerifyOrExit(aQueryType == kAaaaQuery);
+        break;
+
+    case kResolvingIp4Address:
+        VerifyOrExit(aQueryType == kAQuery);
+        break;
+
+    case kNoAction:
+    case kBrowsing:
+        ExitNow();
+    }
+
+    isForAddnlSection = true;
+
+exit:
+    return isForAddnlSection;
+}
+
+Error Server::Response::AppendPtrRecord(const ProxyResult &aResult)
+{
+    const Dnssd::BrowseResult *browseResult = aResult.mBrowseResult;
+
+    mSection = kAnswerSection;
+
+    return AppendPtrRecord(browseResult->mServiceInstance, browseResult->mTtl);
+}
+
+Error Server::Response::AppendSrvRecord(const ProxyResult &aResult)
+{
+    const Dnssd::SrvResult *srvResult = aResult.mSrvResult;
+    Name::Buffer            fullHostName;
+
+    mSection = ((mType == kSrvQuery) || (mType == kSrvTxtQuery)) ? kAnswerSection : kAdditionalDataSection;
+
+    ConstructFullName(srvResult->mHostName, fullHostName);
+
+    return AppendSrvRecord(fullHostName, srvResult->mTtl, srvResult->mPriority, srvResult->mWeight, srvResult->mPort);
+}
+
+Error Server::Response::AppendTxtRecord(const ProxyResult &aResult)
+{
+    const Dnssd::TxtResult *txtResult = aResult.mTxtResult;
+
+    mSection = ((mType == kTxtQuery) || (mType == kSrvTxtQuery)) ? kAnswerSection : kAdditionalDataSection;
+
+    return AppendTxtRecord(txtResult->mTxtData, txtResult->mTxtDataLength, txtResult->mTtl);
+}
+
+Error Server::Response::AppendHostIp6Addresses(const ProxyResult &aResult)
+{
+    Error                       error      = kErrorNone;
+    const Dnssd::AddressResult *addrResult = aResult.mAddressResult;
+
+    mSection = (mType == kAaaaQuery) ? kAnswerSection : kAdditionalDataSection;
+
+    for (uint16_t index = 0; index < addrResult->mAddressesLength; index++)
+    {
+        const Dnssd::AddressAndTtl &entry   = addrResult->mAddresses[index];
+        const Ip6::Address         &address = AsCoreType(&entry.mAddress);
+
+        if (entry.mTtl == 0)
+        {
+            continue;
+        }
+
+        if (!IsProxyAddressValid(address))
+        {
+            continue;
+        }
+
+        SuccessOrExit(error = AppendAaaaRecord(address, entry.mTtl));
+    }
+
+exit:
+    return error;
+}
+
+Error Server::Response::AppendHostIp4Addresses(const ProxyResult &aResult)
+{
+    Error                       error      = kErrorNone;
+    const Dnssd::AddressResult *addrResult = aResult.mAddressResult;
+
+    mSection = (mType == kAQuery) ? kAnswerSection : kAdditionalDataSection;
+
+    for (uint16_t index = 0; index < addrResult->mAddressesLength; index++)
+    {
+        const Dnssd::AddressAndTtl &entry   = addrResult->mAddresses[index];
+        const Ip6::Address         &address = AsCoreType(&entry.mAddress);
+
+        if (entry.mTtl == 0)
+        {
+            continue;
+        }
+
+        SuccessOrExit(error = AppendARecord(address, entry.mTtl));
+    }
+
+exit:
+    return error;
+}
+
+bool Server::IsProxyAddressValid(const Ip6::Address &aAddress)
+{
+    return !aAddress.IsLinkLocalUnicast() && !aAddress.IsMulticast() && !aAddress.IsUnspecified() &&
+           !aAddress.IsLoopback();
+}
+
+#endif // OPENTHREAD_CONFIG_DNSSD_DISCOVERY_PROXY_ENABLE
 
 } // namespace ServiceDiscovery
 } // namespace Dns

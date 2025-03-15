@@ -47,33 +47,30 @@
 #include <openthread/instance.h>
 
 #include "common/dns_utils.hpp"
+#include "host/rcp_host.hpp"
 #include "mdns/mdns.hpp"
-#include "ncp/ncp_openthread.hpp"
 
 namespace otbr {
 namespace Dnssd {
 
 /**
  * This class implements the DNS-SD Discovery Proxy.
- *
  */
-class DiscoveryProxy : private NonCopyable
+class DiscoveryProxy : public Mdns::StateObserver, private NonCopyable
 {
 public:
     /**
      * This constructor initializes the Discovery Proxy instance.
      *
-     * @param[in] aNcp        A reference to the OpenThread Controller instance.
+     * @param[in] aHost       A reference to the OpenThread Controller instance.
      * @param[in] aPublisher  A reference to the mDNS Publisher.
-     *
      */
-    explicit DiscoveryProxy(Ncp::ControllerOpenThread &aNcp, Mdns::Publisher &aPublisher);
+    explicit DiscoveryProxy(Host::RcpHost &aHost, Mdns::Publisher &aPublisher);
 
     /**
      * This method enables/disables the Discovery Proxy.
      *
      * @param[in] aIsEnabled  Whether to enable the Discovery Proxy.
-     *
      */
     void SetEnabled(bool aIsEnabled);
 
@@ -81,7 +78,6 @@ public:
      * This method handles mDNS publisher's state changes.
      *
      * @param[in] aState  The state of mDNS publisher.
-     *
      */
     void HandleMdnsState(Mdns::Publisher::State aState)
     {
@@ -112,10 +108,10 @@ private:
     void Stop(void);
     bool IsEnabled(void) const { return mIsEnabled; }
 
-    Ncp::ControllerOpenThread &mNcp;
-    Mdns::Publisher           &mMdnsPublisher;
-    bool                       mIsEnabled;
-    uint64_t                   mSubscriberId = 0;
+    Host::RcpHost   &mHost;
+    Mdns::Publisher &mMdnsPublisher;
+    bool             mIsEnabled;
+    uint64_t         mSubscriberId = 0;
 };
 
 } // namespace Dnssd

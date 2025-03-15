@@ -30,11 +30,6 @@
 
 #if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE
 
-#include "common/code_utils.hpp"
-#include "common/locator_getters.hpp"
-#include "common/log.hpp"
-#include "common/numeric_limits.hpp"
-#include "common/type_traits.hpp"
 #include "instance/instance.hpp"
 
 /**
@@ -201,6 +196,8 @@ Error Core::UnregisterKey(const Key &aKey)
     return IsKeyForService(aKey) ? Unregister<ServiceEntry>(aKey) : Unregister<HostEntry>(aKey);
 }
 
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
+
 Core::Iterator *Core::AllocateIterator(void) { return EntryIterator::Allocate(GetInstance()); }
 
 void Core::FreeIterator(Iterator &aIterator) { static_cast<EntryIterator &>(aIterator).Free(); }
@@ -219,6 +216,33 @@ Error Core::GetNextKey(Iterator &aIterator, Key &aKey, EntryState &aState) const
 {
     return static_cast<EntryIterator &>(aIterator).GetNextKey(aKey, aState);
 }
+
+Error Core::GetNextBrowser(Iterator &aIterator, Browser &aBrowser, CacheInfo &aInfo) const
+{
+    return static_cast<EntryIterator &>(aIterator).GetNextBrowser(aBrowser, aInfo);
+}
+
+Error Core::GetNextSrvResolver(Iterator &aIterator, SrvResolver &aResolver, CacheInfo &aInfo) const
+{
+    return static_cast<EntryIterator &>(aIterator).GetNextSrvResolver(aResolver, aInfo);
+}
+
+Error Core::GetNextTxtResolver(Iterator &aIterator, TxtResolver &aResolver, CacheInfo &aInfo) const
+{
+    return static_cast<EntryIterator &>(aIterator).GetNextTxtResolver(aResolver, aInfo);
+}
+
+Error Core::GetNextIp6AddressResolver(Iterator &aIterator, AddressResolver &aResolver, CacheInfo &aInfo) const
+{
+    return static_cast<EntryIterator &>(aIterator).GetNextIp6AddressResolver(aResolver, aInfo);
+}
+
+Error Core::GetNextIp4AddressResolver(Iterator &aIterator, AddressResolver &aResolver, CacheInfo &aInfo) const
+{
+    return static_cast<EntryIterator &>(aIterator).GetNextIp4AddressResolver(aResolver, aInfo);
+}
+
+#endif // OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
 
 void Core::InvokeConflictCallback(const char *aName, const char *aServiceType)
 {
@@ -278,7 +302,32 @@ exit:
 
 void Core::HandleEntryTimer(void)
 {
-    EntryTimerContext context(GetInstance());
+    EntryContext context(GetInstance(), TxMessage::kMulticastResponse);
+    NextFireTime nextAggrTxTime(context.GetNow());
+
+    // Determine the next multicast transmission time that is explicitly
+    // after `GetNow()` to set `mNextAggrTxTime`. This is used for
+    // response aggregation. As `HandleTimer()` is called on different
+    // entries, they can decide to extend their answer delay to the
+    // determined `mNextAggrTxTime` so that all answers are included in
+    // the same response message.
+
+    for (HostEntry &entry : mHostEntries)
+    {
+        entry.DetermineNextAggrTxTime(nextAggrTxTime);
+    }
+
+    for (ServiceEntry &entry : mServiceEntries)
+    {
+        entry.DetermineNextAggrTxTime(nextAggrTxTime);
+    }
+
+    for (ServiceType &serviceType : mServiceTypes)
+    {
+        serviceType.DetermineNextAggrTxTime(nextAggrTxTime);
+    }
+
+    context.mNextAggrTxTime = nextAggrTxTime.GetNextTime();
 
     // We process host entries before service entries. This order
     // ensures we can determine whether host addresses have already
@@ -300,15 +349,12 @@ void Core::HandleEntryTimer(void)
         serviceType.HandleTimer(context);
     }
 
-    context.GetProbeMessage().Send();
-    context.GetResponseMessage().Send();
+    context.mProbeMessage.Send();
+    context.mResponseMessage.Send();
 
     RemoveEmptyEntries();
 
-    if (context.GetNextTime() != context.GetNow().GetDistantFuture())
-    {
-        mEntryTimer.FireAtIfEarlier(context.GetNextTime());
-    }
+    mEntryTimer.FireAtIfEarlier(context.mNextFireTime);
 }
 
 void Core::RemoveEmptyEntries(void)
@@ -365,12 +411,13 @@ bool Core::NameMatch(const Heap::String &aFirst, const Heap::String &aSecond)
     return !aSecond.IsNull() && NameMatch(aFirst, aSecond.AsCString());
 }
 
-void Core::UpdateCacheFlushFlagIn(ResourceRecord &aResourceRecord, Section aSection)
+void Core::UpdateCacheFlushFlagIn(ResourceRecord &aResourceRecord, Section aSection, bool aIsLegacyUnicast)
 {
-    // Do not set the cache-flush flag is the record is
-    // appended in Authority Section in a probe message.
+    // Do not set the cache-flush flag if the record is
+    // appended in Authority Section in a probe message,
+    // or is intended for a Legacy Unicast response.
 
-    if (aSection != kAuthoritySection)
+    if (aSection != kAuthoritySection && !aIsLegacyUnicast)
     {
         aResourceRecord.SetClass(aResourceRecord.GetClass() | kClassCacheFlushFlag);
     }
@@ -553,6 +600,11 @@ void Core::RecordInfo::UpdateProperty(AddressArray &aAddrProperty, const Ip6::Ad
     }
 }
 
+uint32_t Core::RecordInfo::GetTtl(bool aIsLegacyUnicast) const
+{
+    return aIsLegacyUnicast ? Min(kMaxLegacyUnicastTtl, mTtl) : mTtl;
+}
+
 void Core::RecordInfo::UpdateTtl(uint32_t aTtl) { return UpdateProperty(mTtl, aTtl); }
 
 void Core::RecordInfo::StartAnnouncing(void)
@@ -570,7 +622,7 @@ void Core::RecordInfo::ScheduleAnswer(const AnswerInfo &aInfo)
 {
     VerifyOrExit(CanAnswer());
 
-    if (aInfo.mUnicastResponse)
+    if (aInfo.mUnicastResponse || aInfo.mLegacyUnicastResponse)
     {
         mUnicastAnswerPending = true;
         ExitNow();
@@ -586,41 +638,68 @@ void Core::RecordInfo::ScheduleAnswer(const AnswerInfo &aInfo)
         // that did not receive and cache the previous transmission will
         // retry its request.
 
-        VerifyOrExit(GetDurationSinceLastMulticast(aInfo.mAnswerTime) >= kMinIntervalBetweenMulticast);
+        VerifyOrExit(GetDurationSinceLastMulticast(aInfo.GetAnswerTime()) >= kMinIntervalBetweenMulticast);
     }
 
     if (mMulticastAnswerPending)
     {
-        VerifyOrExit(aInfo.mAnswerTime < mAnswerTime);
-    }
+        TimeMilli targetAnswerTime;
 
-    mMulticastAnswerPending = true;
-    mAnswerTime             = aInfo.mAnswerTime;
+        if (mCanExtendAnswerDelay && aInfo.mIsProbe)
+        {
+            mCanExtendAnswerDelay = false;
+        }
+
+        targetAnswerTime = Min(aInfo.GetAnswerTime(), GetAnswerTime());
+        mQueryRxTime     = Min(aInfo.mQueryRxTime, mQueryRxTime);
+        mAnswerDelay     = targetAnswerTime - mQueryRxTime;
+    }
+    else
+    {
+        mMulticastAnswerPending = true;
+        mCanExtendAnswerDelay   = !aInfo.mIsProbe;
+        mQueryRxTime            = aInfo.mQueryRxTime;
+        mAnswerDelay            = aInfo.mAnswerDelay;
+    }
 
 exit:
     return;
 }
 
-bool Core::RecordInfo::ShouldAppendTo(TxMessage &aResponse, TimeMilli aNow) const
+bool Core::RecordInfo::ShouldAppendTo(EntryContext &aContext)
 {
     bool shouldAppend = false;
 
     VerifyOrExit(mIsPresent);
 
-    switch (aResponse.GetType())
+    switch (aContext.mResponseMessage.GetType())
     {
     case TxMessage::kMulticastResponse:
 
-        if ((mAnnounceCounter < kNumberOfAnnounces) && (mAnnounceTime <= aNow))
+        if ((mAnnounceCounter < kNumberOfAnnounces) && (mAnnounceTime <= aContext.GetNow()))
         {
             shouldAppend = true;
             ExitNow();
         }
 
-        shouldAppend = mMulticastAnswerPending && (mAnswerTime <= aNow);
+        if (mMulticastAnswerPending && (GetAnswerTime() <= aContext.GetNow()))
+        {
+            // Check if we can delay the answer further so that it can
+            // be aggregated with other responses scheduled to go out a
+            // little later.
+
+            if (ExtendAnswerDelay(aContext) == kErrorNone)
+            {
+                ExitNow();
+            }
+
+            shouldAppend = true;
+        }
+
         break;
 
     case TxMessage::kUnicastResponse:
+    case TxMessage::kLegacyUnicastResponse:
         shouldAppend = mUnicastAnswerPending;
         break;
 
@@ -630,6 +709,36 @@ bool Core::RecordInfo::ShouldAppendTo(TxMessage &aResponse, TimeMilli aNow) cons
 
 exit:
     return shouldAppend;
+}
+
+Error Core::RecordInfo::ExtendAnswerDelay(EntryContext &aContext)
+{
+    Error error = kErrorFailed;
+
+    // Extend the answer delay for response aggregation when possible.
+    //
+    // This method is called when we have a pending multicast answer
+    // (`mMulticastAnswerPending`) and the answer time has already
+    // expired. We first check if the answer can be delayed (e.g., it
+    // is not allowed for probe responses) and that there is an
+    // upcoming `mNextAggrTxTime` within a short window of time from
+    // `GetNow()`, before extending the delay. We ensure that the
+    // overall answer delay does not exceed
+    // `kResponseAggregationMaxDelay`.
+
+    VerifyOrExit(mCanExtendAnswerDelay);
+
+    VerifyOrExit(aContext.mNextAggrTxTime != aContext.GetNow().GetDistantFuture());
+    VerifyOrExit(aContext.mNextAggrTxTime - aContext.GetNow() < kResponseAggregationMaxDelay);
+
+    VerifyOrExit(aContext.mNextAggrTxTime - mQueryRxTime < kResponseAggregationMaxDelay);
+
+    mAnswerDelay = aContext.mNextAggrTxTime - mQueryRxTime;
+
+    error = kErrorNone;
+
+exit:
+    return error;
 }
 
 void Core::RecordInfo::UpdateStateAfterAnswer(const TxMessage &aResponse)
@@ -667,6 +776,7 @@ void Core::RecordInfo::UpdateStateAfterAnswer(const TxMessage &aResponse)
         break;
 
     case TxMessage::kUnicastResponse:
+    case TxMessage::kLegacyUnicastResponse:
         VerifyOrExit(IsAppended());
         VerifyOrExit(mAppendSection == kAnswerSection);
         mUnicastAnswerPending = false;
@@ -691,7 +801,7 @@ void Core::RecordInfo::UpdateFireTimeOn(FireTime &aFireTime)
 
     if (mMulticastAnswerPending)
     {
-        aFireTime.SetFireTime(mAnswerTime);
+        aFireTime.SetFireTime(GetAnswerTime());
     }
 
     if (mIsLastMulticastValid)
@@ -719,6 +829,24 @@ exit:
     return;
 }
 
+void Core::RecordInfo::DetermineNextAggrTxTime(NextFireTime &aNextAggrTxTime) const
+{
+    VerifyOrExit(mIsPresent);
+
+    if (mAnnounceCounter < kNumberOfAnnounces)
+    {
+        aNextAggrTxTime.UpdateIfEarlierAndInFuture(mAnnounceTime);
+    }
+
+    if (mMulticastAnswerPending)
+    {
+        aNextAggrTxTime.UpdateIfEarlierAndInFuture(GetAnswerTime());
+    }
+
+exit:
+    return;
+}
+
 void Core::RecordInfo::MarkAsAppended(TxMessage &aTxMessage, Section aSection)
 {
     mAppendSection = aSection;
@@ -739,6 +867,7 @@ void Core::RecordInfo::MarkAsAppended(TxMessage &aTxMessage, Section aSection)
         break;
 
     case TxMessage::kUnicastResponse:
+    case TxMessage::kLegacyUnicastResponse:
         mAppendState = kAppendedInUnicastMsg;
         break;
 
@@ -823,6 +952,14 @@ void Core::FireTime::ScheduleFireTimeOn(TimerMilli &aTimer)
     }
 }
 
+void Core::FireTime::UpdateNextFireTimeOn(NextFireTime &aNextFireTime) const
+{
+    if (mHasFireTime)
+    {
+        aNextFireTime.UpdateIfEarlier(mFireTime);
+    }
+}
+
 //----------------------------------------------------------------------------------------------------------------------
 // Core::Entry
 
@@ -832,6 +969,7 @@ Core::Entry::Entry(void)
     , mMulticastNsecPending(false)
     , mUnicastNsecPending(false)
     , mAppendedNsec(false)
+    , mBypassCallbackStateCheck(false)
 {
 }
 
@@ -903,6 +1041,12 @@ void Core::Entry::SetCallback(const Callback &aCallback)
     ScheduleCallbackTask();
 }
 
+void Core::Entry::MarkToInvokeCallbackUnconditionally(void)
+{
+    mBypassCallbackStateCheck = true;
+    Get<Core>().mEntryTask.Post();
+}
+
 void Core::Entry::ScheduleCallbackTask(void)
 {
     switch (GetState())
@@ -925,6 +1069,16 @@ exit:
 void Core::Entry::InvokeCallbacks(void)
 {
     Error error = kErrorNone;
+
+    // `mBypassCallbackStateCheck` is used when host is registered
+    // with no address, which is treated as unregistering the host.
+    // This ensures host registration callback is invoked properly.
+
+    if (mBypassCallbackStateCheck)
+    {
+        mBypassCallbackStateCheck = false;
+        mCallback.InvokeAndClear(GetInstance(), error);
+    }
 
     switch (GetState())
     {
@@ -1015,18 +1169,27 @@ void Core::Entry::ScheduleNsecAnswer(const AnswerInfo &aInfo)
     {
         if (mMulticastNsecPending)
         {
-            VerifyOrExit(aInfo.mAnswerTime < mNsecAnswerTime);
-        }
+            TimeMilli targetAnswerTime = Min(aInfo.GetAnswerTime(), GetNsecAnswerTime());
 
-        mMulticastNsecPending = true;
-        mNsecAnswerTime       = aInfo.mAnswerTime;
+            mNsecQueryRxTime = Min(aInfo.mQueryRxTime, mNsecQueryRxTime);
+            mNsecAnswerDelay = targetAnswerTime - mNsecQueryRxTime;
+        }
+        else
+        {
+            mMulticastNsecPending = true;
+            mNsecQueryRxTime      = aInfo.mQueryRxTime;
+            mNsecAnswerDelay      = aInfo.mAnswerDelay;
+        }
     }
 
 exit:
     return;
 }
 
-bool Core::Entry::ShouldAnswerNsec(TimeMilli aNow) const { return mMulticastNsecPending && (mNsecAnswerTime <= aNow); }
+bool Core::Entry::ShouldAnswerNsec(TimeMilli aNow) const
+{
+    return mMulticastNsecPending && (GetNsecAnswerTime() <= aNow);
+}
 
 void Core::Entry::AnswerNonProbe(const AnswerInfo &aInfo, RecordAndType *aRecords, uint16_t aRecordsLength)
 {
@@ -1072,7 +1235,7 @@ void Core::Entry::AnswerProbe(const AnswerInfo &aInfo, RecordAndType *aRecords, 
     TimeMilli  now               = TimerMilli::GetNow();
     AnswerInfo info              = aInfo;
 
-    info.mAnswerTime = now;
+    info.mAnswerDelay = 0;
 
     OT_ASSERT(info.mIsProbe);
 
@@ -1102,7 +1265,8 @@ void Core::Entry::AnswerProbe(const AnswerInfo &aInfo, RecordAndType *aRecords, 
             }
             else if (record.GetLastMulticastTime(lastMulticastTime) == kErrorNone)
             {
-                info.mAnswerTime = Max(info.mAnswerTime, lastMulticastTime + kMinIntervalProbeResponse);
+                info.mAnswerDelay =
+                    Max(info.GetAnswerTime(), lastMulticastTime + kMinIntervalProbeResponse) - info.mQueryRxTime;
             }
         }
     }
@@ -1120,7 +1284,7 @@ void Core::Entry::AnswerProbe(const AnswerInfo &aInfo, RecordAndType *aRecords, 
 
     if (!shouldDelay)
     {
-        info.mAnswerTime = now;
+        info.mAnswerDelay = 0;
     }
 
     for (uint16_t index = 0; index < aRecordsLength; index++)
@@ -1138,13 +1302,23 @@ void Core::Entry::DetermineNextFireTime(void)
 
     if (mMulticastNsecPending)
     {
-        SetFireTime(mNsecAnswerTime);
+        SetFireTime(GetNsecAnswerTime());
+    }
+}
+
+void Core::Entry::DetermineNextAggrTxTime(NextFireTime &aNextAggrTxTime) const
+{
+    mKeyRecord.DetermineNextAggrTxTime(aNextAggrTxTime);
+
+    if (mMulticastNsecPending)
+    {
+        aNextAggrTxTime.UpdateIfEarlierAndInFuture(GetNsecAnswerTime());
     }
 }
 
 void Core::Entry::ScheduleTimer(void) { ScheduleFireTimeOn(Get<Core>().mEntryTimer); }
 
-template <typename EntryType> void Core::Entry::HandleTimer(EntryTimerContext &aContext)
+template <typename EntryType> void Core::Entry::HandleTimer(EntryContext &aContext)
 {
     EntryType *thisAsEntryType = static_cast<EntryType *>(this);
 
@@ -1161,7 +1335,7 @@ template <typename EntryType> void Core::Entry::HandleTimer(EntryTimerContext &a
         {
             mProbeCount++;
             SetFireTime(aContext.GetNow() + kProbeWaitTime);
-            thisAsEntryType->PrepareProbe(aContext.GetProbeMessage());
+            thisAsEntryType->PrepareProbe(aContext.mProbeMessage);
             break;
         }
 
@@ -1171,7 +1345,7 @@ template <typename EntryType> void Core::Entry::HandleTimer(EntryTimerContext &a
         OT_FALL_THROUGH;
 
     case kRegistered:
-        thisAsEntryType->PrepareResponse(aContext.GetResponseMessage(), aContext.GetNow());
+        thisAsEntryType->PrepareResponse(aContext);
         break;
 
     case kConflict:
@@ -1182,10 +1356,7 @@ template <typename EntryType> void Core::Entry::HandleTimer(EntryTimerContext &a
     thisAsEntryType->DetermineNextFireTime();
 
 exit:
-    if (HasFireTime())
-    {
-        aContext.UpdateNextTime(GetFireTime());
-    }
+    UpdateNextFireTimeOn(aContext.mNextFireTime);
 }
 
 void Core::Entry::AppendQuestionTo(TxMessage &aTxMessage) const
@@ -1210,6 +1381,7 @@ void Core::Entry::AppendKeyRecordTo(TxMessage &aTxMessage, Section aSection, Nam
 {
     Message       *message;
     ResourceRecord record;
+    bool           isLegacyUnicast = (aTxMessage.GetType() == TxMessage::kLegacyUnicastResponse);
 
     VerifyOrExit(mKeyRecord.CanAppend());
     mKeyRecord.MarkAsAppended(aTxMessage, aSection);
@@ -1222,9 +1394,9 @@ void Core::Entry::AppendKeyRecordTo(TxMessage &aTxMessage, Section aSection, Nam
     aNameAppender(*this, aTxMessage, aSection);
 
     record.Init(ResourceRecord::kTypeKey);
-    record.SetTtl(mKeyRecord.GetTtl());
     record.SetLength(mKeyData.GetLength());
-    UpdateCacheFlushFlagIn(record, aSection);
+    record.SetTtl(mKeyRecord.GetTtl(isLegacyUnicast));
+    UpdateCacheFlushFlagIn(record, aSection, isLegacyUnicast);
 
     SuccessOrAssert(message->Append(record));
     SuccessOrAssert(message->AppendBytes(mKeyData.GetBytes(), mKeyData.GetLength()));
@@ -1244,10 +1416,11 @@ void Core::Entry::AppendNsecRecordTo(TxMessage       &aTxMessage,
     NsecRecord             nsec;
     NsecRecord::TypeBitMap bitmap;
     uint16_t               offset;
+    bool                   isLegacyUnicast = (aTxMessage.GetType() == TxMessage::kLegacyUnicastResponse);
 
     nsec.Init();
-    nsec.SetTtl(kNsecTtl);
-    UpdateCacheFlushFlagIn(nsec, aSection);
+    nsec.SetTtl(isLegacyUnicast ? kLegacyUnicastNsecTtl : kNsecTtl);
+    UpdateCacheFlushFlagIn(nsec, aSection, isLegacyUnicast);
 
     bitmap.Clear();
 
@@ -1332,7 +1505,16 @@ void Core::HostEntry::Register(const Host &aHost, const Callback &aCallback)
         // If host is registered with no addresses, treat it
         // as host being unregistered and announce removal of
         // the old addresses.
+
         Unregister(aHost);
+
+        // Set the callback again as `Unregister()` may clear it.
+        // Also mark to invoke the callback unconditionally (bypassing
+        // entry state check). The callback will be invoked
+        // after returning from this method from the posted tasklet.
+
+        SetCallback(aCallback);
+        MarkToInvokeCallbackUnconditionally();
         ExitNow();
     }
 
@@ -1446,7 +1628,7 @@ exit:
     return;
 }
 
-void Core::HostEntry::HandleTimer(EntryTimerContext &aContext) { Entry::HandleTimer<HostEntry>(aContext); }
+void Core::HostEntry::HandleTimer(EntryContext &aContext) { Entry::HandleTimer<HostEntry>(aContext); }
 
 void Core::HostEntry::ClearAppendState(void)
 {
@@ -1485,40 +1667,42 @@ void Core::HostEntry::StartAnnouncing(void)
     mKeyRecord.StartAnnouncing();
 }
 
-void Core::HostEntry::PrepareResponse(TxMessage &aResponse, TimeMilli aNow)
+void Core::HostEntry::PrepareResponse(EntryContext &aContext)
 {
-    bool prepareAgain = false;
+    bool       prepareAgain = false;
+    TxMessage &response     = aContext.mResponseMessage;
 
     do
     {
-        aResponse.SaveCurrentState();
-        PrepareResponseRecords(aResponse, aNow);
-        aResponse.CheckSizeLimitToPrepareAgain(prepareAgain);
+        response.SaveCurrentState();
+        PrepareResponseRecords(aContext);
+        response.CheckSizeLimitToPrepareAgain(prepareAgain);
 
     } while (prepareAgain);
 
-    UpdateRecordsState(aResponse);
+    UpdateRecordsState(response);
 }
 
-void Core::HostEntry::PrepareResponseRecords(TxMessage &aResponse, TimeMilli aNow)
+void Core::HostEntry::PrepareResponseRecords(EntryContext &aContext)
 {
-    bool appendNsec = false;
+    bool       appendNsec = false;
+    TxMessage &response   = aContext.mResponseMessage;
 
-    if (mAddrRecord.ShouldAppendTo(aResponse, aNow))
+    if (mAddrRecord.ShouldAppendTo(aContext))
     {
-        AppendAddressRecordsTo(aResponse, kAnswerSection);
+        AppendAddressRecordsTo(response, kAnswerSection);
         appendNsec = true;
     }
 
-    if (mKeyRecord.ShouldAppendTo(aResponse, aNow))
+    if (mKeyRecord.ShouldAppendTo(aContext))
     {
-        AppendKeyRecordTo(aResponse, kAnswerSection);
+        AppendKeyRecordTo(response, kAnswerSection);
         appendNsec = true;
     }
 
-    if (appendNsec || ShouldAnswerNsec(aNow))
+    if (appendNsec || ShouldAnswerNsec(aContext.GetNow()))
     {
-        AppendNsecRecordTo(aResponse, kAdditionalDataSection);
+        AppendNsecRecordTo(response, kAdditionalDataSection);
     }
 }
 
@@ -1546,9 +1730,21 @@ exit:
     return;
 }
 
+void Core::HostEntry::DetermineNextAggrTxTime(NextFireTime &aNextAggrTxTime) const
+{
+    VerifyOrExit(GetState() == kRegistered);
+
+    Entry::DetermineNextAggrTxTime(aNextAggrTxTime);
+    mAddrRecord.DetermineNextAggrTxTime(aNextAggrTxTime);
+
+exit:
+    return;
+}
+
 void Core::HostEntry::AppendAddressRecordsTo(TxMessage &aTxMessage, Section aSection)
 {
     Message *message;
+    bool     isLegacyUnicast = (aTxMessage.GetType() == TxMessage::kLegacyUnicastResponse);
 
     VerifyOrExit(mAddrRecord.CanAppend());
     mAddrRecord.MarkAsAppended(aTxMessage, aSection);
@@ -1560,9 +1756,9 @@ void Core::HostEntry::AppendAddressRecordsTo(TxMessage &aTxMessage, Section aSec
         AaaaRecord aaaaRecord;
 
         aaaaRecord.Init();
-        aaaaRecord.SetTtl(mAddrRecord.GetTtl());
         aaaaRecord.SetAddress(address);
-        UpdateCacheFlushFlagIn(aaaaRecord, aSection);
+        aaaaRecord.SetTtl(mAddrRecord.GetTtl(isLegacyUnicast));
+        UpdateCacheFlushFlagIn(aaaaRecord, aSection, isLegacyUnicast);
 
         AppendNameTo(aTxMessage, aSection);
         SuccessOrAssert(message->Append(aaaaRecord));
@@ -1617,6 +1813,8 @@ exit:
     return;
 }
 
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
+
 Error Core::HostEntry::CopyInfoTo(Host &aHost, EntryState &aState) const
 {
     Error error = kErrorNone;
@@ -1646,6 +1844,8 @@ Error Core::HostEntry::CopyInfoTo(Key &aKey, EntryState &aState) const
 exit:
     return error;
 }
+
+#endif // OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
 
 //----------------------------------------------------------------------------------------------------------------------
 // Core::ServiceEntry
@@ -1970,7 +2170,7 @@ exit:
     return shouldSuppress;
 }
 
-void Core::ServiceEntry::HandleTimer(EntryTimerContext &aContext) { Entry::HandleTimer<ServiceEntry>(aContext); }
+void Core::ServiceEntry::HandleTimer(EntryContext &aContext) { Entry::HandleTimer<ServiceEntry>(aContext); }
 
 void Core::ServiceEntry::ClearAppendState(void)
 {
@@ -2036,32 +2236,36 @@ void Core::ServiceEntry::StartAnnouncing(void)
     UpdateServiceTypes();
 }
 
-void Core::ServiceEntry::PrepareResponse(TxMessage &aResponse, TimeMilli aNow)
+void Core::ServiceEntry::PrepareResponse(EntryContext &aContext)
 {
-    bool prepareAgain = false;
+    bool       prepareAgain = false;
+    TxMessage &response     = aContext.mResponseMessage;
 
     do
     {
-        aResponse.SaveCurrentState();
-        PrepareResponseRecords(aResponse, aNow);
-        aResponse.CheckSizeLimitToPrepareAgain(prepareAgain);
+        response.SaveCurrentState();
+        PrepareResponseRecords(aContext);
+        response.CheckSizeLimitToPrepareAgain(prepareAgain);
 
     } while (prepareAgain);
 
-    UpdateRecordsState(aResponse);
+    UpdateRecordsState(response);
 }
 
-void Core::ServiceEntry::PrepareResponseRecords(TxMessage &aResponse, TimeMilli aNow)
+void Core::ServiceEntry::PrepareResponseRecords(EntryContext &aContext)
 {
-    bool       appendNsec = false;
-    HostEntry *hostEntry  = nullptr;
+    bool       appendNsec                    = false;
+    bool       appendAdditionalRecordsForPtr = false;
+    HostEntry *hostEntry                     = nullptr;
+    TxMessage &response                      = aContext.mResponseMessage;
 
     DiscoverOffsetsAndHost(hostEntry);
 
     // We determine records to include in Additional Data section
     // per RFC 6763 section 12:
     //
-    // - For base PTR, we include SRV, TXT, and host addresses.
+    // - For PTR (base or sub-type), we include SRV, TXT, and host
+    //   addresses.
     // - For SRV, we include host addresses only (TXT record not
     //   recommended).
     //
@@ -2072,33 +2276,43 @@ void Core::ServiceEntry::PrepareResponseRecords(TxMessage &aResponse, TimeMilli 
     // Additional Data inclusion, but this is skipped if the record
     // is already appended in the Answer section.
 
-    if (mPtrRecord.ShouldAppendTo(aResponse, aNow))
+    if (mPtrRecord.ShouldAppendTo(aContext))
     {
-        AppendPtrRecordTo(aResponse, kAnswerSection);
+        AppendPtrRecordTo(response, kAnswerSection);
 
         if (mPtrRecord.GetTtl() > 0)
         {
-            mSrvRecord.MarkToAppendInAdditionalData();
-            mTxtRecord.MarkToAppendInAdditionalData();
-
-            if (hostEntry != nullptr)
-            {
-                hostEntry->mAddrRecord.MarkToAppendInAdditionalData();
-            }
+            appendAdditionalRecordsForPtr = true;
         }
     }
 
     for (SubType &subType : mSubTypes)
     {
-        if (subType.mPtrRecord.ShouldAppendTo(aResponse, aNow))
+        if (subType.mPtrRecord.ShouldAppendTo(aContext))
         {
-            AppendPtrRecordTo(aResponse, kAnswerSection, &subType);
+            AppendPtrRecordTo(response, kAnswerSection, &subType);
+
+            if (subType.mPtrRecord.GetTtl() > 0)
+            {
+                appendAdditionalRecordsForPtr = true;
+            }
         }
     }
 
-    if (mSrvRecord.ShouldAppendTo(aResponse, aNow))
+    if (appendAdditionalRecordsForPtr)
     {
-        AppendSrvRecordTo(aResponse, kAnswerSection);
+        mSrvRecord.MarkToAppendInAdditionalData();
+        mTxtRecord.MarkToAppendInAdditionalData();
+
+        if (hostEntry != nullptr)
+        {
+            hostEntry->mAddrRecord.MarkToAppendInAdditionalData();
+        }
+    }
+
+    if (mSrvRecord.ShouldAppendTo(aContext))
+    {
+        AppendSrvRecordTo(response, kAnswerSection);
         appendNsec = true;
 
         if ((mSrvRecord.GetTtl() > 0) && (hostEntry != nullptr))
@@ -2107,15 +2321,15 @@ void Core::ServiceEntry::PrepareResponseRecords(TxMessage &aResponse, TimeMilli 
         }
     }
 
-    if (mTxtRecord.ShouldAppendTo(aResponse, aNow))
+    if (mTxtRecord.ShouldAppendTo(aContext))
     {
-        AppendTxtRecordTo(aResponse, kAnswerSection);
+        AppendTxtRecordTo(response, kAnswerSection);
         appendNsec = true;
     }
 
-    if (mKeyRecord.ShouldAppendTo(aResponse, aNow))
+    if (mKeyRecord.ShouldAppendTo(aContext))
     {
-        AppendKeyRecordTo(aResponse, kAnswerSection);
+        AppendKeyRecordTo(response, kAnswerSection);
         appendNsec = true;
     }
 
@@ -2123,22 +2337,22 @@ void Core::ServiceEntry::PrepareResponseRecords(TxMessage &aResponse, TimeMilli 
 
     if (mSrvRecord.ShouldAppendInAdditionalDataSection())
     {
-        AppendSrvRecordTo(aResponse, kAdditionalDataSection);
+        AppendSrvRecordTo(response, kAdditionalDataSection);
     }
 
     if (mTxtRecord.ShouldAppendInAdditionalDataSection())
     {
-        AppendTxtRecordTo(aResponse, kAdditionalDataSection);
+        AppendTxtRecordTo(response, kAdditionalDataSection);
     }
 
     if ((hostEntry != nullptr) && (hostEntry->mAddrRecord.ShouldAppendInAdditionalDataSection()))
     {
-        hostEntry->AppendAddressRecordsTo(aResponse, kAdditionalDataSection);
+        hostEntry->AppendAddressRecordsTo(response, kAdditionalDataSection);
     }
 
-    if (appendNsec || ShouldAnswerNsec(aNow))
+    if (appendNsec || ShouldAnswerNsec(aContext.GetNow()))
     {
-        AppendNsecRecordTo(aResponse, kAdditionalDataSection);
+        AppendNsecRecordTo(response, kAdditionalDataSection);
     }
 }
 
@@ -2176,6 +2390,25 @@ void Core::ServiceEntry::DetermineNextFireTime(void)
     for (SubType &subType : mSubTypes)
     {
         subType.mPtrRecord.UpdateFireTimeOn(*this);
+    }
+
+exit:
+    return;
+}
+
+void Core::ServiceEntry::DetermineNextAggrTxTime(NextFireTime &aNextAggrTxTime) const
+{
+    VerifyOrExit(GetState() == kRegistered);
+
+    Entry::DetermineNextAggrTxTime(aNextAggrTxTime);
+
+    mPtrRecord.DetermineNextAggrTxTime(aNextAggrTxTime);
+    mSrvRecord.DetermineNextAggrTxTime(aNextAggrTxTime);
+    mTxtRecord.DetermineNextAggrTxTime(aNextAggrTxTime);
+
+    for (const SubType &subType : mSubTypes)
+    {
+        subType.mPtrRecord.DetermineNextAggrTxTime(aNextAggrTxTime);
     }
 
 exit:
@@ -2310,6 +2543,7 @@ void Core::ServiceEntry::AppendSrvRecordTo(TxMessage &aTxMessage, Section aSecti
     Message  *message;
     SrvRecord srv;
     uint16_t  offset;
+    bool      isLegacyUnicast = (aTxMessage.GetType() == TxMessage::kLegacyUnicastResponse);
 
     VerifyOrExit(mSrvRecord.CanAppend());
     mSrvRecord.MarkAsAppended(aTxMessage, aSection);
@@ -2317,13 +2551,17 @@ void Core::ServiceEntry::AppendSrvRecordTo(TxMessage &aTxMessage, Section aSecti
     message = &aTxMessage.SelectMessageFor(aSection);
 
     srv.Init();
-    srv.SetTtl(mSrvRecord.GetTtl());
     srv.SetPriority(mPriority);
     srv.SetWeight(mWeight);
     srv.SetPort(mPort);
-    UpdateCacheFlushFlagIn(srv, aSection);
+    srv.SetTtl(mSrvRecord.GetTtl(isLegacyUnicast));
+    UpdateCacheFlushFlagIn(srv, aSection, isLegacyUnicast);
 
-    AppendServiceNameTo(aTxMessage, aSection);
+    // RFC6762, Section 18.14 Name Compression:
+    // In legacy unicast responses generated to answer legacy queries, name
+    // compression MUST NOT be performed on SRV records.
+    AppendServiceNameTo(aTxMessage, aSection, /* aPerformNameCompression */ !isLegacyUnicast);
+
     offset = message->GetLength();
     SuccessOrAssert(message->Append(srv));
     AppendHostNameTo(aTxMessage, aSection);
@@ -2339,6 +2577,7 @@ void Core::ServiceEntry::AppendTxtRecordTo(TxMessage &aTxMessage, Section aSecti
 {
     Message  *message;
     TxtRecord txt;
+    bool      isLegacyUnicast = (aTxMessage.GetType() == TxMessage::kLegacyUnicastResponse);
 
     VerifyOrExit(mTxtRecord.CanAppend());
     mTxtRecord.MarkAsAppended(aTxMessage, aSection);
@@ -2346,9 +2585,9 @@ void Core::ServiceEntry::AppendTxtRecordTo(TxMessage &aTxMessage, Section aSecti
     message = &aTxMessage.SelectMessageFor(aSection);
 
     txt.Init();
-    txt.SetTtl(mTxtRecord.GetTtl());
     txt.SetLength(mTxtData.GetLength());
-    UpdateCacheFlushFlagIn(txt, aSection);
+    txt.SetTtl(mTxtRecord.GetTtl(isLegacyUnicast));
+    UpdateCacheFlushFlagIn(txt, aSection, isLegacyUnicast);
 
     AppendServiceNameTo(aTxMessage, aSection);
     SuccessOrAssert(message->Append(txt));
@@ -2369,6 +2608,7 @@ void Core::ServiceEntry::AppendPtrRecordTo(TxMessage &aTxMessage, Section aSecti
     RecordInfo &ptrRecord = (aSubType == nullptr) ? mPtrRecord : aSubType->mPtrRecord;
     PtrRecord   ptr;
     uint16_t    offset;
+    bool        isLegacyUnicast = (aTxMessage.GetType() == TxMessage::kLegacyUnicastResponse);
 
     VerifyOrExit(ptrRecord.CanAppend());
     ptrRecord.MarkAsAppended(aTxMessage, aSection);
@@ -2376,7 +2616,7 @@ void Core::ServiceEntry::AppendPtrRecordTo(TxMessage &aTxMessage, Section aSecti
     message = &aTxMessage.SelectMessageFor(aSection);
 
     ptr.Init();
-    ptr.SetTtl(ptrRecord.GetTtl());
+    ptr.SetTtl(ptrRecord.GetTtl(isLegacyUnicast));
 
     if (aSubType == nullptr)
     {
@@ -2433,12 +2673,22 @@ void Core::ServiceEntry::AppendEntryName(Entry &aEntry, TxMessage &aTxMessage, S
     static_cast<ServiceEntry &>(aEntry).AppendServiceNameTo(aTxMessage, aSection);
 }
 
-void Core::ServiceEntry::AppendServiceNameTo(TxMessage &aTxMessage, Section aSection)
+void Core::ServiceEntry::AppendServiceNameTo(TxMessage &aTxMessage, Section aSection, bool aPerformNameCompression)
 {
     AppendOutcome outcome;
 
-    outcome = aTxMessage.AppendLabel(aSection, mServiceInstance.AsCString(), mServiceNameOffset);
-    VerifyOrExit(outcome != kAppendedFullNameAsCompressed);
+    if (!aPerformNameCompression)
+    {
+        uint16_t compressOffset = kUnspecifiedOffset;
+
+        outcome = aTxMessage.AppendLabel(aSection, mServiceInstance.AsCString(), compressOffset);
+        VerifyOrExit(outcome == kAppendedLabels);
+    }
+    else
+    {
+        outcome = aTxMessage.AppendLabel(aSection, mServiceInstance.AsCString(), mServiceNameOffset);
+        VerifyOrExit(outcome != kAppendedFullNameAsCompressed);
+    }
 
     AppendServiceTypeTo(aTxMessage, aSection);
 
@@ -2490,6 +2740,8 @@ exit:
     return;
 }
 
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
+
 Error Core::ServiceEntry::CopyInfoTo(Service &aService, EntryState &aState, EntryIterator &aIterator) const
 {
     Error error = kErrorNone;
@@ -2533,6 +2785,8 @@ Error Core::ServiceEntry::CopyInfoTo(Key &aKey, EntryState &aState) const
 exit:
     return error;
 }
+
+#endif // OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
 
 //----------------------------------------------------------------------------------------------------------------------
 // Core::ServiceEntry::SubType
@@ -2622,7 +2876,7 @@ bool Core::ServiceType::ShouldSuppressKnownAnswer(uint32_t aTtl) const
     return (aTtl > mServicesPtr.GetTtl() / 2);
 }
 
-void Core::ServiceType::HandleTimer(EntryTimerContext &aContext)
+void Core::ServiceType::HandleTimer(EntryContext &aContext)
 {
     ClearAppendState();
 
@@ -2630,37 +2884,35 @@ void Core::ServiceType::HandleTimer(EntryTimerContext &aContext)
     VerifyOrExit(GetFireTime() <= aContext.GetNow());
     ClearFireTime();
 
-    PrepareResponse(aContext.GetResponseMessage(), aContext.GetNow());
+    PrepareResponse(aContext);
 
     mServicesPtr.UpdateFireTimeOn(*this);
 
 exit:
-    if (HasFireTime())
-    {
-        aContext.UpdateNextTime(GetFireTime());
-    }
+    UpdateNextFireTimeOn(aContext.mNextFireTime);
 }
 
-void Core::ServiceType::PrepareResponse(TxMessage &aResponse, TimeMilli aNow)
+void Core::ServiceType::PrepareResponse(EntryContext &aContext)
 {
-    bool prepareAgain = false;
+    bool       prepareAgain = false;
+    TxMessage &response     = aContext.mResponseMessage;
 
     do
     {
-        aResponse.SaveCurrentState();
-        PrepareResponseRecords(aResponse, aNow);
-        aResponse.CheckSizeLimitToPrepareAgain(prepareAgain);
+        response.SaveCurrentState();
+        PrepareResponseRecords(aContext);
+        response.CheckSizeLimitToPrepareAgain(prepareAgain);
 
     } while (prepareAgain);
 
-    mServicesPtr.UpdateStateAfterAnswer(aResponse);
+    mServicesPtr.UpdateStateAfterAnswer(response);
 }
 
-void Core::ServiceType::PrepareResponseRecords(TxMessage &aResponse, TimeMilli aNow)
+void Core::ServiceType::PrepareResponseRecords(EntryContext &aContext)
 {
     uint16_t serviceTypeOffset = kUnspecifiedOffset;
 
-    VerifyOrExit(mServicesPtr.ShouldAppendTo(aResponse, aNow));
+    VerifyOrExit(mServicesPtr.ShouldAppendTo(aContext));
 
     // Discover compress offset for `mServiceType` if previously
     // appended from any `ServiceEntry`.
@@ -2683,7 +2935,7 @@ void Core::ServiceType::PrepareResponseRecords(TxMessage &aResponse, TimeMilli a
         }
     }
 
-    AppendPtrRecordTo(aResponse, serviceTypeOffset);
+    AppendPtrRecordTo(aContext.mResponseMessage, serviceTypeOffset);
 
 exit:
     return;
@@ -2701,7 +2953,14 @@ void Core::ServiceType::AppendPtrRecordTo(TxMessage &aResponse, uint16_t aServic
     message = &aResponse.SelectMessageFor(kAnswerSection);
 
     ptr.Init();
-    ptr.SetTtl(mServicesPtr.GetTtl());
+    if (aResponse.GetType() == TxMessage::kLegacyUnicastResponse)
+    {
+        ptr.SetTtl(Min(Core::RecordInfo::kMaxLegacyUnicastTtl, mServicesPtr.GetTtl()));
+    }
+    else
+    {
+        ptr.SetTtl(mServicesPtr.GetTtl());
+    }
 
     aResponse.AppendServicesDnssdName(kAnswerSection);
     offset = message->GetLength();
@@ -2715,22 +2974,27 @@ exit:
     return;
 }
 
+void Core::ServiceType::DetermineNextAggrTxTime(NextFireTime &aNextAggrTxTime) const
+{
+    mServicesPtr.DetermineNextAggrTxTime(aNextAggrTxTime);
+}
+
 //----------------------------------------------------------------------------------------------------------------------
 // Core::TxMessage
 
-Core::TxMessage::TxMessage(Instance &aInstance, Type aType)
+Core::TxMessage::TxMessage(Instance &aInstance, Type aType, uint16_t aQueryId)
     : InstanceLocator(aInstance)
 {
-    Init(aType);
+    Init(aType, aQueryId);
 }
 
-Core::TxMessage::TxMessage(Instance &aInstance, Type aType, const AddressInfo &aUnicastDest)
-    : TxMessage(aInstance, aType)
+Core::TxMessage::TxMessage(Instance &aInstance, Type aType, const AddressInfo &aUnicastDest, uint16_t aQueryId)
+    : TxMessage(aInstance, aType, aQueryId)
 {
     mUnicastDest = aUnicastDest;
 }
 
-void Core::TxMessage::Init(Type aType)
+void Core::TxMessage::Init(Type aType, uint16_t aMessageId)
 {
     Header header;
 
@@ -2763,7 +3027,9 @@ void Core::TxMessage::Init(Type aType)
         break;
     case kMulticastResponse:
     case kUnicastResponse:
+    case kLegacyUnicastResponse:
         header.SetType(Header::kTypeResponse);
+        header.SetMessageId(aMessageId);
         break;
     }
 
@@ -2790,9 +3056,9 @@ Message &Core::TxMessage::SelectMessageFor(Section aSection)
         mainSection  = kQuestionSection;
         extraSection = kAnswerSection;
         break;
-
-    case kMulticastResponse:
+    case kLegacyUnicastResponse:
     case kUnicastResponse:
+    case kMulticastResponse:
         break;
     }
 
@@ -2948,6 +3214,16 @@ exit:
     return;
 }
 
+void Core::TxMessage::AddQuestionFrom(const Message &aMessage)
+{
+    uint16_t offset = sizeof(Header);
+
+    IgnoreError(Name::ParseName(aMessage, offset));
+    offset += sizeof(ot::Dns::Question);
+    SuccessOrAssert(mMsgPtr->AppendBytesFromMessage(aMessage, sizeof(Header), offset - sizeof(Header)));
+    IncrementRecordCount(kQuestionSection);
+}
+
 void Core::TxMessage::SaveOffset(uint16_t &aCompressOffset, const Message &aMessage, Section aSection)
 {
     // Saves the current message offset in `aCompressOffset` for name
@@ -3073,6 +3349,7 @@ void Core::TxMessage::Send(void)
         break;
 
     case kUnicastResponse:
+    case kLegacyUnicastResponse:
         otPlatMdnsSendUnicast(&GetInstance(), mMsgPtr.Release(), &mUnicastDest);
         break;
     }
@@ -3142,6 +3419,8 @@ void Core::TxMessage::Reinit(void)
         // in any other query question.
 
         break;
+    case kLegacyUnicastResponse:
+        break;
     }
 }
 
@@ -3174,35 +3453,23 @@ bool Core::TxMessage::ShouldClearAppendStateOnReinit(const Entry &aEntry) const
 }
 
 //----------------------------------------------------------------------------------------------------------------------
-// Core::TimerContext
+// Core::EntryContext
 
-Core::TimerContext::TimerContext(Instance &aInstance)
-    : InstanceLocator(aInstance)
-    , mNow(TimerMilli::GetNow())
-    , mNextTime(mNow.GetDistantFuture())
+Core::EntryContext::EntryContext(Instance &aInstance, TxMessage::Type aResponseType)
+    : mProbeMessage(aInstance, TxMessage::kMulticastProbe)
+    , mResponseMessage(aInstance, aResponseType)
 {
+    mNextAggrTxTime = mNextFireTime.GetNow().GetDistantFuture();
 }
 
-void Core::TimerContext::UpdateNextTime(TimeMilli aTime)
+Core::EntryContext::EntryContext(Instance          &aInstance,
+                                 TxMessage::Type    aResponseType,
+                                 const AddressInfo &aDest,
+                                 uint16_t           aQueryId)
+    : mProbeMessage(aInstance, TxMessage::kMulticastProbe)
+    , mResponseMessage(aInstance, aResponseType, aDest, aQueryId)
 {
-    if (aTime <= mNow)
-    {
-        mNextTime = mNow;
-    }
-    else
-    {
-        mNextTime = Min(mNextTime, aTime);
-    }
-}
-
-//----------------------------------------------------------------------------------------------------------------------
-// Core::EntryTimerContext
-
-Core::EntryTimerContext::EntryTimerContext(Instance &aInstance)
-    : TimerContext(aInstance)
-    , mProbeMessage(aInstance, TxMessage::kMulticastProbe)
-    , mResponseMessage(aInstance, TxMessage::kMulticastResponse)
-{
+    mNextAggrTxTime = mNextFireTime.GetNow().GetDistantFuture();
 }
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -3222,7 +3489,8 @@ Error Core::RxMessage::Init(Instance          &aInstance,
 
     InstanceLocatorInit::Init(aInstance);
 
-    mNext = nullptr;
+    mNext   = nullptr;
+    mRxTime = TimerMilli::GetNow();
 
     VerifyOrExit(!aMessagePtr.IsNull(), error = kErrorInvalidArgs);
 
@@ -3245,11 +3513,12 @@ Error Core::RxMessage::Init(Instance          &aInstance,
 
     if (aSenderAddress.mPort != kUdpPort)
     {
-        if (mIsQuery)
+        // Simple DNS resolver does not allow more than one question in a query message
+        if (mIsQuery && header.GetQuestionCount() == 1)
         {
             // Section 6.7 Legacy Unicast
-            LogInfo("We do not yet support legacy unicast message (source port not matching mDNS port)");
-            ExitNow(error = kErrorNotCapable);
+            mIsLegacyUnicast = true;
+            mQueryId         = header.GetMessageId();
         }
         else
         {
@@ -3353,7 +3622,7 @@ Core::RxMessage::ProcessOutcome Core::RxMessage::ProcessQuery(bool aShouldProces
     bool           shouldDelay         = false;
     bool           canAnswer           = false;
     bool           needUnicastResponse = false;
-    TimeMilli      answerTime;
+    uint16_t       delay               = 0;
 
     for (Question &question : mQuestions)
     {
@@ -3375,11 +3644,16 @@ Core::RxMessage::ProcessOutcome Core::RxMessage::ProcessQuery(bool aShouldProces
         {
             canAnswer = true;
 
-            if (question.mUnicastResponse)
+            if (question.mUnicastResponse || mIsLegacyUnicast)
             {
                 needUnicastResponse = true;
             }
         }
+    }
+
+    if (mIsLegacyUnicast)
+    {
+        shouldDelay = false;
     }
 
     VerifyOrExit(canAnswer);
@@ -3390,21 +3664,19 @@ Core::RxMessage::ProcessOutcome Core::RxMessage::ProcessQuery(bool aShouldProces
         ExitNow();
     }
 
-    answerTime = TimerMilli::GetNow();
-
     if (shouldDelay)
     {
-        answerTime += Random::NonCrypto::GetUint32InRange(kMinResponseDelay, kMaxResponseDelay);
+        delay = Random::NonCrypto::GetUint32InRange(kMinResponseDelay, kMaxResponseDelay);
     }
 
     for (const Question &question : mQuestions)
     {
-        AnswerQuestion(question, answerTime);
+        AnswerQuestion(question, delay);
     }
 
     if (needUnicastResponse)
     {
-        SendUnicastResponse(mSenderAddress);
+        SendUnicastResponse();
     }
 
 exit:
@@ -3509,7 +3781,7 @@ exit:
     return;
 }
 
-void Core::RxMessage::AnswerQuestion(const Question &aQuestion, TimeMilli aAnswerTime)
+void Core::RxMessage::AnswerQuestion(const Question &aQuestion, uint16_t aDelay)
 {
     HostEntry    *hostEntry;
     ServiceEntry *serviceEntry;
@@ -3517,10 +3789,12 @@ void Core::RxMessage::AnswerQuestion(const Question &aQuestion, TimeMilli aAnswe
 
     VerifyOrExit(aQuestion.mCanAnswer);
 
-    answerInfo.mQuestionRrType  = aQuestion.mRrType;
-    answerInfo.mAnswerTime      = aAnswerTime;
-    answerInfo.mIsProbe         = aQuestion.mIsProbe;
-    answerInfo.mUnicastResponse = aQuestion.mUnicastResponse;
+    answerInfo.mQuestionRrType        = aQuestion.mRrType;
+    answerInfo.mAnswerDelay           = aDelay;
+    answerInfo.mQueryRxTime           = mRxTime;
+    answerInfo.mIsProbe               = aQuestion.mIsProbe;
+    answerInfo.mUnicastResponse       = aQuestion.mUnicastResponse;
+    answerInfo.mLegacyUnicastResponse = mIsLegacyUnicast;
 
     if (aQuestion.mIsForAllServicesDnssd)
     {
@@ -3736,30 +4010,37 @@ exit:
     return shouldSuppress;
 }
 
-void Core::RxMessage::SendUnicastResponse(const AddressInfo &aUnicastDest)
+void Core::RxMessage::SendUnicastResponse(void)
 {
-    TxMessage response(GetInstance(), TxMessage::kUnicastResponse, aUnicastDest);
-    TimeMilli now = TimerMilli::GetNow();
+    TxMessage::Type responseType = mIsLegacyUnicast ? TxMessage::kLegacyUnicastResponse : TxMessage::kUnicastResponse;
+    EntryContext    context(GetInstance(), responseType, mSenderAddress, mIsLegacyUnicast ? mQueryId : 0);
+
+    if (mIsLegacyUnicast)
+    {
+        // RFC6762, section 6.7:
+        // Legacy Unicast Response must repeat the question
+        context.mResponseMessage.AddQuestionFrom(*mMessagePtr);
+    }
 
     for (HostEntry &entry : Get<Core>().mHostEntries)
     {
         entry.ClearAppendState();
-        entry.PrepareResponse(response, now);
+        entry.PrepareResponse(context);
     }
 
     for (ServiceEntry &entry : Get<Core>().mServiceEntries)
     {
         entry.ClearAppendState();
-        entry.PrepareResponse(response, now);
+        entry.PrepareResponse(context);
     }
 
     for (ServiceType &serviceType : Get<Core>().mServiceTypes)
     {
         serviceType.ClearAppendState();
-        serviceType.PrepareResponse(response, now);
+        serviceType.PrepareResponse(context);
     }
 
-    response.Send();
+    context.mResponseMessage.Send();
 }
 
 void Core::RxMessage::ProcessResponse(void)
@@ -3992,11 +4273,10 @@ void Core::MultiPacketRxMessages::AddNew(OwnedPtr<RxMessage> &aRxMessagePtr)
 
 void Core::MultiPacketRxMessages::HandleTimer(void)
 {
-    TimeMilli              now      = TimerMilli::GetNow();
-    TimeMilli              nextTime = now.GetDistantFuture();
+    NextFireTime           nextTime;
     OwningList<RxMsgEntry> expiredEntries;
 
-    mRxMsgEntries.RemoveAllMatching(ExpireChecker(now), expiredEntries);
+    mRxMsgEntries.RemoveAllMatching(expiredEntries, ExpireChecker(nextTime.GetNow()));
 
     for (RxMsgEntry &expiredEntry : expiredEntries)
     {
@@ -4005,13 +4285,10 @@ void Core::MultiPacketRxMessages::HandleTimer(void)
 
     for (const RxMsgEntry &msgEntry : mRxMsgEntries)
     {
-        nextTime = Min(nextTime, msgEntry.mProcessTime);
+        nextTime.UpdateIfEarlier(msgEntry.mProcessTime);
     }
 
-    if (nextTime != now.GetDistantFuture())
-    {
-        mTimer.FireAtIfEarlier(nextTime);
-    }
+    mTimer.FireAtIfEarlier(nextTime);
 }
 
 void Core::MultiPacketRxMessages::Clear(void)
@@ -4135,20 +4412,16 @@ void Core::TxMessageHistory::CalculateHash(const Message &aMessage, Hash &aHash)
 
 void Core::TxMessageHistory::HandleTimer(void)
 {
-    TimeMilli now      = TimerMilli::GetNow();
-    TimeMilli nextTime = now.GetDistantFuture();
+    NextFireTime nextTime;
 
-    mHashEntries.RemoveAndFreeAllMatching(ExpireChecker(now));
+    mHashEntries.RemoveAndFreeAllMatching(ExpireChecker(nextTime.GetNow()));
 
     for (const HashEntry &entry : mHashEntries)
     {
-        nextTime = Min(nextTime, entry.mExpireTime);
+        nextTime.UpdateIfEarlier(entry.mExpireTime);
     }
 
-    if (nextTime != now.GetDistantFuture())
-    {
-        mTimer.FireAtIfEarlier(nextTime);
-    }
+    mTimer.FireAtIfEarlier(nextTime);
 }
 
 template <typename CacheType, typename BrowserResolverType>
@@ -4260,8 +4533,8 @@ void Core::AddPassiveIp6AddrCache(const char *aHostName)
 
 void Core::HandleCacheTimer(void)
 {
-    CacheTimerContext context(GetInstance());
-    ExpireChecker     expireChecker(context.GetNow());
+    CacheContext  context(GetInstance());
+    ExpireChecker expireChecker(context.GetNow());
 
     // First remove all expired entries.
 
@@ -4299,12 +4572,9 @@ void Core::HandleCacheTimer(void)
         addrCache.HandleTimer(context);
     }
 
-    context.GetQueryMessage().Send();
+    context.mQueryMessage.Send();
 
-    if (context.GetNextTime() != context.GetNow().GetDistantFuture())
-    {
-        mCacheTimer.FireAtIfEarlier(context.GetNextTime());
-    }
+    mCacheTimer.FireAtIfEarlier(context.mNextFireTime);
 }
 
 void Core::HandleCacheTask(void)
@@ -4407,11 +4677,10 @@ void Core::ResultCallback::Invoke(Instance &aInstance, const AddressResult &aRes
 }
 
 //---------------------------------------------------------------------------------------------------------------------
-// Core::CacheTimerContext
+// Core::CacheContext
 
-Core::CacheTimerContext::CacheTimerContext(Instance &aInstance)
-    : TimerContext(aInstance)
-    , mQueryMessage(aInstance, TxMessage::kMulticastQuery)
+Core::CacheContext::CacheContext(Instance &aInstance)
+    : mQueryMessage(aInstance, TxMessage::kMulticastQuery)
 {
 }
 
@@ -4717,7 +4986,7 @@ void Core::CacheEntry::ClearEmptyCallbacks(void)
     }
 }
 
-void Core::CacheEntry::HandleTimer(CacheTimerContext &aContext)
+void Core::CacheEntry::HandleTimer(CacheContext &aContext)
 {
     switch (mType)
     {
@@ -4773,10 +5042,7 @@ void Core::CacheEntry::HandleTimer(CacheTimerContext &aContext)
     DetermineNextFireTime();
 
 exit:
-    if (HasFireTime())
-    {
-        aContext.UpdateNextTime(GetFireTime());
-    }
+    UpdateNextFireTimeOn(aContext.mNextFireTime);
 }
 
 Core::ResultCallback *Core::CacheEntry::FindCallbackMatching(const ResultCallback &aCallback)
@@ -4841,13 +5107,13 @@ void Core::CacheEntry::DetermineNextFireTime(void)
 
 void Core::CacheEntry::ScheduleTimer(void) { ScheduleFireTimeOn(Get<Core>().mCacheTimer); }
 
-void Core::CacheEntry::PrepareQuery(CacheTimerContext &aContext)
+void Core::CacheEntry::PrepareQuery(CacheContext &aContext)
 {
     bool prepareAgain = false;
 
     do
     {
-        TxMessage &query = aContext.GetQueryMessage();
+        TxMessage &query = aContext.mQueryMessage;
 
         query.SaveCurrentState();
 
@@ -5179,7 +5445,7 @@ void Core::BrowseCache::ProcessExpiredRecords(TimeMilli aNow)
 {
     OwningList<PtrEntry> expiredEntries;
 
-    mPtrEntries.RemoveAllMatching(ExpireChecker(aNow), expiredEntries);
+    mPtrEntries.RemoveAllMatching(expiredEntries, ExpireChecker(aNow));
 
     for (PtrEntry &exiredEntry : expiredEntries)
     {
@@ -5205,6 +5471,20 @@ void Core::BrowseCache::ReportResultsTo(ResultCallback &aCallback) const
         }
     }
 }
+
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
+
+void Core::BrowseCache::CopyInfoTo(Browser &aBrowser, CacheInfo &aInfo) const
+{
+    aBrowser.mServiceType   = mServiceType.AsCString();
+    aBrowser.mSubTypeLabel  = mSubTypeLabel.AsCString();
+    aBrowser.mInfraIfIndex  = Get<Core>().mInfraIfIndex;
+    aBrowser.mCallback      = nullptr;
+    aInfo.mIsActive         = IsActive();
+    aInfo.mHasCachedResults = !mPtrEntries.IsEmpty();
+}
+
+#endif
 
 //---------------------------------------------------------------------------------------------------------------------
 // Core::BrowseCache::PtrEntry
@@ -5494,6 +5774,20 @@ void Core::SrvCache::ConvertTo(SrvResult &aResult) const
     aResult.mInfraIfIndex    = Get<Core>().mInfraIfIndex;
 }
 
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
+
+void Core::SrvCache::CopyInfoTo(SrvResolver &aResolver, CacheInfo &aInfo) const
+{
+    aResolver.mServiceInstance = mServiceInstance.AsCString();
+    aResolver.mServiceType     = mServiceType.AsCString();
+    aResolver.mInfraIfIndex    = Get<Core>().mInfraIfIndex;
+    aResolver.mCallback        = nullptr;
+    aInfo.mIsActive            = IsActive();
+    aInfo.mHasCachedResults    = mRecord.IsPresent();
+}
+
+#endif
+
 //---------------------------------------------------------------------------------------------------------------------
 // Core::TxtCache
 
@@ -5664,6 +5958,20 @@ void Core::TxtCache::ConvertTo(TxtResult &aResult) const
     aResult.mTtl             = mRecord.GetTtl();
     aResult.mInfraIfIndex    = Get<Core>().mInfraIfIndex;
 }
+
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
+
+void Core::TxtCache::CopyInfoTo(TxtResolver &aResolver, CacheInfo &aInfo) const
+{
+    aResolver.mServiceInstance = mServiceInstance.AsCString();
+    aResolver.mServiceType     = mServiceType.AsCString();
+    aResolver.mInfraIfIndex    = Get<Core>().mInfraIfIndex;
+    aResolver.mCallback        = nullptr;
+    aInfo.mIsActive            = IsActive();
+    aInfo.mHasCachedResults    = mRecord.IsPresent();
+}
+
+#endif
 
 //---------------------------------------------------------------------------------------------------------------------
 // Core::AddrCache
@@ -5991,6 +6299,19 @@ void Core::AddrCache::CommitNewResponseEntries(void)
     ScheduleTimer();
 }
 
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
+
+void Core::AddrCache::CopyInfoTo(AddressResolver &aResolver, CacheInfo &aInfo) const
+{
+    aResolver.mHostName     = mName.AsCString();
+    aResolver.mInfraIfIndex = Get<Core>().mInfraIfIndex;
+    aResolver.mCallback     = nullptr;
+    aInfo.mIsActive         = IsActive();
+    aInfo.mHasCachedResults = !mCommittedEntries.IsEmpty();
+}
+
+#endif
+
 //---------------------------------------------------------------------------------------------------------------------
 // Core::AddrCache::AddrEntry
 
@@ -6080,6 +6401,8 @@ void Core::Ip4AddrCache::PrepareAQuestion(TxMessage &aQuery) { PrepareQueryQuest
 
 //---------------------------------------------------------------------------------------------------------------------
 // Core::Iterator
+
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
 
 Core::EntryIterator::EntryIterator(Instance &aInstance)
     : InstanceLocator(aInstance)
@@ -6174,6 +6497,123 @@ Error Core::EntryIterator::GetNextKey(Key &aKey, EntryState &aState)
 exit:
     return error;
 }
+
+Error Core::EntryIterator::GetNextBrowser(Browser &aBrowser, CacheInfo &aInfo)
+{
+    Error error = kErrorNone;
+
+    if (mType == kUnspecified)
+    {
+        mBrowseCache = Get<Core>().mBrowseCacheList.GetHead();
+        mType        = kBrowser;
+    }
+    else
+    {
+        VerifyOrExit(mType == kBrowser, error = kErrorInvalidArgs);
+    }
+
+    VerifyOrExit(mBrowseCache != nullptr, error = kErrorNotFound);
+
+    mBrowseCache->CopyInfoTo(aBrowser, aInfo);
+    mBrowseCache = mBrowseCache->GetNext();
+
+exit:
+    return error;
+}
+
+Error Core::EntryIterator::GetNextSrvResolver(SrvResolver &aResolver, CacheInfo &aInfo)
+{
+    Error error = kErrorNone;
+
+    if (mType == kUnspecified)
+    {
+        mSrvCache = Get<Core>().mSrvCacheList.GetHead();
+        mType     = kSrvResolver;
+    }
+    else
+    {
+        VerifyOrExit(mType == kSrvResolver, error = kErrorInvalidArgs);
+    }
+
+    VerifyOrExit(mSrvCache != nullptr, error = kErrorNotFound);
+
+    mSrvCache->CopyInfoTo(aResolver, aInfo);
+    mSrvCache = mSrvCache->GetNext();
+
+exit:
+    return error;
+}
+
+Error Core::EntryIterator::GetNextTxtResolver(TxtResolver &aResolver, CacheInfo &aInfo)
+{
+    Error error = kErrorNone;
+
+    if (mType == kUnspecified)
+    {
+        mTxtCache = Get<Core>().mTxtCacheList.GetHead();
+        mType     = kTxtResolver;
+    }
+    else
+    {
+        VerifyOrExit(mType == kTxtResolver, error = kErrorInvalidArgs);
+    }
+
+    VerifyOrExit(mTxtCache != nullptr, error = kErrorNotFound);
+
+    mTxtCache->CopyInfoTo(aResolver, aInfo);
+    mTxtCache = mTxtCache->GetNext();
+
+exit:
+    return error;
+}
+
+Error Core::EntryIterator::GetNextIp6AddressResolver(AddressResolver &aResolver, CacheInfo &aInfo)
+{
+    Error error = kErrorNone;
+
+    if (mType == kUnspecified)
+    {
+        mIp6AddrCache = Get<Core>().mIp6AddrCacheList.GetHead();
+        mType         = kIp6AddrResolver;
+    }
+    else
+    {
+        VerifyOrExit(mType == kIp6AddrResolver, error = kErrorInvalidArgs);
+    }
+
+    VerifyOrExit(mIp6AddrCache != nullptr, error = kErrorNotFound);
+
+    mIp6AddrCache->CopyInfoTo(aResolver, aInfo);
+    mIp6AddrCache = mIp6AddrCache->GetNext();
+
+exit:
+    return error;
+}
+
+Error Core::EntryIterator::GetNextIp4AddressResolver(AddressResolver &aResolver, CacheInfo &aInfo)
+{
+    Error error = kErrorNone;
+
+    if (mType == kUnspecified)
+    {
+        mIp4AddrCache = Get<Core>().mIp4AddrCacheList.GetHead();
+        mType         = kIp4AddrResolver;
+    }
+    else
+    {
+        VerifyOrExit(mType == kIp4AddrResolver, error = kErrorInvalidArgs);
+    }
+
+    VerifyOrExit(mIp4AddrCache != nullptr, error = kErrorNotFound);
+
+    mIp4AddrCache->CopyInfoTo(aResolver, aInfo);
+    mIp4AddrCache = mIp4AddrCache->GetNext();
+
+exit:
+    return error;
+}
+
+#endif // OPENTHREAD_CONFIG_MULTICAST_DNS_ENTRY_ITERATION_API_ENABLE
 
 } // namespace Multicast
 } // namespace Dns

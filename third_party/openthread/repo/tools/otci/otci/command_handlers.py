@@ -52,6 +52,14 @@ class OTCommandHandler(ABC):
         """
 
     @abstractmethod
+    def execute_platform_command(self, cmd: str, timeout: float) -> List[str]:
+        """Method execute_platform_command should execute the platform command within a timeout (in seconds) and
+        return the command output as a list of lines.
+
+        Note: each line of the command output MUST NOT contain '\r\n' at the end.
+        """
+
+    @abstractmethod
     def close(self):
         """Method close should close the OT Command Handler."""
 
@@ -105,8 +113,7 @@ class OtCliCommandRunner(OTCommandHandler):
 
         self.__pending_lines = queue.Queue()
         self.__should_close = threading.Event()
-        self.__otcli_reader = threading.Thread(target=self.__otcli_read_routine)
-        self.__otcli_reader.setDaemon(True)
+        self.__otcli_reader = threading.Thread(target=self.__otcli_read_routine, daemon=True)
         self.__otcli_reader.start()
 
     def __repr__(self):
@@ -129,6 +136,9 @@ class OtCliCommandRunner(OTCommandHandler):
                                     OtCliCommandRunner.__PATTERN_COMMAND_DONE_OR_ERROR,
                                     asynchronous=cmd.split()[0] in OtCliCommandRunner.__ASYNC_COMMANDS)
         return output
+
+    def execute_platform_command(self, cmd, timeout=10) -> List[str]:
+        raise NotImplementedError(f'Platform command is not supported on {self.__class__.__name__}')
 
     def wait(self, duration: float) -> List[str]:
         self.__otcli.wait(duration)
@@ -262,6 +272,12 @@ class OtbrSshCommandRunner(OTCommandHandler):
 
         return output
 
+    def execute_platform_command(self, cmd, timeout=10) -> List[str]:
+        if self.__sudo:
+            cmd = 'sudo ' + cmd
+
+        return self.shell(cmd, timeout=timeout)
+
     def shell(self, cmd: str, timeout: float) -> List[str]:
         cmd_in, cmd_out, cmd_err = self.__ssh.exec_command(cmd, timeout=int(timeout), bufsize=1024)
         errput = [l.rstrip('\r\n') for l in cmd_err.readlines()]
@@ -285,18 +301,16 @@ class OtbrSshCommandRunner(OTCommandHandler):
 
 class OtbrAdbCommandRunner(OTCommandHandler):
 
-    def __init__(self, host, port):
-        from adb_shell.adb_device import AdbDeviceTcp
+    from adb_shell.adb_device import AdbDevice
 
-        self.__host = host
-        self.__port = port
-        self.__adb = AdbDeviceTcp(host, port, default_transport_timeout_s=9.0)
+    def __init__(self, adb: AdbDevice, adb_key: Optional[str] = None):
+        from adb_shell.auth.sign_pythonrsa import PythonRSASigner
 
+        self.__adb = adb
         self.__line_read_callback = None
-        self.__adb.connect(rsa_keys=None, auth_timeout_s=0.1)
+        rsa_keys = None if adb_key is None else [PythonRSASigner.FromRSAKeyPath(adb_key)]
 
-    def __repr__(self):
-        return f'{self.__host}:{self.__port}'
+        self.__adb.connect(rsa_keys=rsa_keys, auth_timeout_s=0.1)
 
     def execute_command(self, cmd: str, timeout: float) -> List[str]:
         sh_cmd = f'ot-ctl {cmd}'
@@ -312,8 +326,12 @@ class OtbrAdbCommandRunner(OTCommandHandler):
 
         return output
 
+    def execute_platform_command(self, cmd: str, timeout: float = 10) -> List[str]:
+        return self.shell(cmd, timeout=timeout)
+
     def shell(self, cmd: str, timeout: float) -> List[str]:
-        return self.__adb.shell(cmd, timeout_s=timeout).splitlines()
+        return self.__adb.shell(cmd, transport_timeout_s=timeout, read_timeout_s=timeout,
+                                timeout_s=timeout).splitlines()
 
     def close(self):
         self.__adb.close()
@@ -324,3 +342,32 @@ class OtbrAdbCommandRunner(OTCommandHandler):
 
     def set_line_read_callback(self, callback: Optional[Callable[[str], Any]]):
         self.__line_read_callback = callback
+
+
+class OtbrAdbTcpCommandRunner(OtbrAdbCommandRunner):
+
+    def __init__(self, host: str, port: int, adb_key: Optional[str] = None):
+        from adb_shell.adb_device import AdbDeviceTcp
+
+        self.__host = host
+        self.__port = port
+
+        adb = AdbDeviceTcp(host, port, default_transport_timeout_s=9.0)
+        super(OtbrAdbTcpCommandRunner, self).__init__(adb, adb_key)
+
+    def __repr__(self):
+        return f'{self.__host}:{self.__port}'
+
+
+class OtbrAdbUsbCommandRunner(OtbrAdbCommandRunner):
+
+    def __init__(self, serial: str, adb_key: Optional[str] = None):
+        from adb_shell.adb_device import AdbDeviceUsb
+
+        self.__serial = serial
+
+        adb = AdbDeviceUsb(serial, port_path=None, default_transport_timeout_s=9.0)
+        super(OtbrAdbUsbCommandRunner, self).__init__(adb, adb_key)
+
+    def __repr__(self):
+        return f'USB:{self.__serial}'

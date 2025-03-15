@@ -101,7 +101,7 @@ set(COMMON_SOURCES
     coap/coap_secure.cpp
     common/appender.cpp
     common/binary_search.cpp
-    common/crc16.cpp
+    common/crc.cpp
     common/data.cpp
     common/error.cpp
     common/frame_builder.cpp
@@ -112,6 +112,7 @@ set(COMMON_SOURCES
     common/log.cpp
     common/message.cpp
     common/notifier.cpp
+    common/offset_range.cpp
     common/preference.cpp
     common/random.cpp
     common/settings.cpp
@@ -139,15 +140,18 @@ set(COMMON_SOURCES
     mac/mac.cpp
     mac/mac_filter.cpp
     mac/mac_frame.cpp
+    mac/mac_header_ie.cpp
     mac/mac_links.cpp
     mac/mac_types.cpp
     mac/sub_mac.cpp
     mac/sub_mac_callbacks.cpp
+    mac/sub_mac_csl_receiver.cpp
+    mac/sub_mac_wed.cpp
+    mac/wakeup_tx_scheduler.cpp
     meshcop/announce_begin_client.cpp
     meshcop/border_agent.cpp
     meshcop/commissioner.cpp
     meshcop/dataset.cpp
-    meshcop/dataset_local.cpp
     meshcop/dataset_manager.cpp
     meshcop/dataset_manager_ftd.cpp
     meshcop/dataset_updater.cpp
@@ -288,9 +292,12 @@ set(RADIO_COMMON_SOURCES
     instance/instance.cpp
     mac/link_raw.cpp
     mac/mac_frame.cpp
+    mac/mac_header_ie.cpp
     mac/mac_types.cpp
     mac/sub_mac.cpp
     mac/sub_mac_callbacks.cpp
+    mac/sub_mac_csl_receiver.cpp
+    mac/sub_mac_wed.cpp
     radio/radio.cpp
     radio/radio_callbacks.cpp
     radio/radio_platform.cpp

@@ -48,7 +48,7 @@
 #include <openthread/backbone_router_ftd.h>
 #include <openthread/logging.h>
 
-#include "core/common/arg_macros.hpp"
+#include "common/arg_macros.hpp"
 #include "core/common/debug.hpp"
 
 namespace ot {
@@ -310,7 +310,7 @@ otError MulticastRoutingManager::AddMulticastForwardingCache(const Ip6::Address 
     }
     else
     {
-        VerifyOrExit(!aSrcAddr.IsLinkLocal(), error = OT_ERROR_NONE);
+        VerifyOrExit(!aSrcAddr.IsLinkLocalUnicast(), error = OT_ERROR_NONE);
         VerifyOrExit(aSrcAddr.GetPrefix() != AsCoreType(otThreadGetMeshLocalPrefix(gInstance)), error = OT_ERROR_NONE);
         // Forward multicast traffic from Thread to Backbone if multicast scope > kRealmLocalScope
         // TODO: (MLR) allow scope configuration of outbound multicast routing
@@ -400,7 +400,7 @@ void MulticastRoutingManager::ExpireMulticastForwardingCache(void)
     uint64_t            now = otPlatTimeGet();
     struct mf6cctl      mf6cctl;
 
-    VerifyOrExit(now >= mLastExpireTime + kMulticastForwardingCacheExpiringInterval * US_PER_S);
+    VerifyOrExit(now >= mLastExpireTime + kMulticastForwardingCacheExpiringInterval * OT_US_PER_S);
 
     mLastExpireTime = now;
 
@@ -409,7 +409,7 @@ void MulticastRoutingManager::ExpireMulticastForwardingCache(void)
 
     for (MulticastForwardingCache &mfc : mMulticastForwardingCacheTable)
     {
-        if (mfc.IsValid() && mfc.mLastUseTime + kMulticastForwardingCacheExpireTimeout * US_PER_S < now)
+        if (mfc.IsValid() && mfc.mLastUseTime + kMulticastForwardingCacheExpireTimeout * OT_US_PER_S < now)
         {
             if (!UpdateMulticastRouteInfo(mfc))
             {

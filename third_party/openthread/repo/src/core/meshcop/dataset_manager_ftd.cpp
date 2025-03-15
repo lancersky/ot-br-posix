@@ -29,59 +29,29 @@
 /**
  * @file
  *   This file implements MeshCoP Datasets manager to process commands.
- *
  */
 
 #include "meshcop/dataset_manager.hpp"
 
 #if OPENTHREAD_FTD
 
-#include <stdio.h>
-
-#include <openthread/platform/radio.h>
-
-#include "coap/coap_message.hpp"
-#include "common/as_core_type.hpp"
-#include "common/code_utils.hpp"
-#include "common/debug.hpp"
-#include "common/locator_getters.hpp"
-#include "common/log.hpp"
-#include "common/random.hpp"
-#include "common/timer.hpp"
 #include "instance/instance.hpp"
-#include "meshcop/dataset.hpp"
-#include "meshcop/meshcop.hpp"
-#include "meshcop/meshcop_leader.hpp"
-#include "meshcop/meshcop_tlvs.hpp"
-#include "thread/thread_netif.hpp"
-#include "thread/thread_tlvs.hpp"
-#include "thread/uri_paths.hpp"
 
 namespace ot {
 namespace MeshCoP {
 
 RegisterLogModule("DatasetManager");
 
-Error DatasetManager::AppendMleDatasetTlv(Message &aMessage) const
-{
-    Mle::Tlv::Type mleTlvType = IsActiveDataset() ? Mle::Tlv::kActiveDataset : Mle::Tlv::kPendingDataset;
-    Dataset        dataset;
+//----------------------------------------------------------------------------------------------------------------------
+// DatasetManager
 
-    IgnoreError(Read(dataset));
-
-    // Remove the Active or Pending Timestamp TLV from Dataset before
-    // appending to the message. The timestamp is appended as its own
-    // MLE TLV to the message.
-
-    dataset.RemoveTlv(IsActiveDataset() ? Tlv::kActiveTimestamp : Tlv::kPendingTimestamp);
-
-    return Tlv::AppendTlv(aMessage, mleTlvType, dataset.GetBytes(), dataset.GetLength());
-}
-
-Error DatasetManager::ProcessSetRequest(const Coap::Message &aMessage, SetRequestInfo &aInfo) const
+Error DatasetManager::ProcessSetOrReplaceRequest(MgmtCommand          aCommand,
+                                                 const Coap::Message &aMessage,
+                                                 RequestInfo         &aInfo) const
 {
     Error              error = kErrorParse;
     Dataset            dataset;
+    OffsetRange        offsetRange;
     Timestamp          activeTimestamp;
     ChannelTlvValue    channelValue;
     uint16_t           sessionId;
@@ -92,7 +62,8 @@ Error DatasetManager::ProcessSetRequest(const Coap::Message &aMessage, SetReques
 
     aInfo.Clear();
 
-    SuccessOrExit(dataset.SetFrom(aMessage, aMessage.GetOffset(), aMessage.GetLength() - aMessage.GetOffset()));
+    offsetRange.InitFromMessageOffsetToEnd(aMessage);
+    SuccessOrExit(dataset.SetFrom(aMessage, offsetRange));
     SuccessOrExit(dataset.ValidateTlvs());
 
     // Verify that the request includes timestamps that are
@@ -105,11 +76,11 @@ Error DatasetManager::ProcessSetRequest(const Coap::Message &aMessage, SetReques
         Timestamp pendingTimestamp;
 
         SuccessOrExit(dataset.Read<PendingTimestampTlv>(pendingTimestamp));
-        VerifyOrExit(Timestamp::Compare(&pendingTimestamp, mLocal.GetTimestamp()) > 0);
+        VerifyOrExit(pendingTimestamp > mLocalTimestamp);
     }
     else
     {
-        VerifyOrExit(Timestamp::Compare(&activeTimestamp, mLocal.GetTimestamp()) > 0);
+        VerifyOrExit(activeTimestamp > mLocalTimestamp);
     }
 
     // Determine whether the new Dataset affects connectivity
@@ -150,9 +121,7 @@ Error DatasetManager::ProcessSetRequest(const Coap::Message &aMessage, SetReques
 
     if (IsPendingDataset() && !aInfo.mAffectsNetworkKey)
     {
-        const Timestamp *localActiveTimestamp = Get<ActiveDatasetManager>().GetTimestamp();
-
-        VerifyOrExit(Timestamp::Compare(&activeTimestamp, localActiveTimestamp) > 0);
+        VerifyOrExit(activeTimestamp > Get<ActiveDatasetManager>().GetTimestamp());
     }
 
     // Determine whether the request is from commissioner.
@@ -180,7 +149,19 @@ Error DatasetManager::ProcessSetRequest(const Coap::Message &aMessage, SetReques
         // MGMT_ACTIVE_SET.req/MGMT_PENDING_SET.req from Commissioner
         // based on existing active dataset.
 
-        IgnoreError(Get<ActiveDatasetManager>().Read(aInfo.mDataset));
+        if (aCommand == kMgmtSet)
+        {
+            IgnoreError(Get<ActiveDatasetManager>().Read(aInfo.mDataset));
+        }
+    }
+
+    if (aCommand == kMgmtReplace)
+    {
+        // MGMT_ACTIVE_REPLACE can only be used by commissioner.
+
+        VerifyOrExit(aInfo.mIsFromCommissioner);
+        VerifyOrExit(IsActiveDataset());
+        VerifyOrExit(dataset.ContainsAllRequiredTlvsFor(Dataset::kActive));
     }
 
     SuccessOrExit(error = aInfo.mDataset.WriteTlvsFrom(dataset));
@@ -207,19 +188,22 @@ exit:
     return error;
 }
 
-Error DatasetManager::HandleSet(const Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+Error DatasetManager::HandleSetOrReplace(MgmtCommand             aCommand,
+                                         const Coap::Message    &aMessage,
+                                         const Ip6::MessageInfo &aMessageInfo)
 {
     StateTlv::State state = StateTlv::kReject;
-    SetRequestInfo  info;
+    RequestInfo     info;
 
     VerifyOrExit(Get<Mle::Mle>().IsLeader());
 
-    SuccessOrExit(ProcessSetRequest(aMessage, info));
+    SuccessOrExit(ProcessSetOrReplaceRequest(aCommand, aMessage, info));
 
     if (IsActiveDataset() && info.mAffectsConnectivity)
     {
-        // MGMT_ACTIVE_SET.req which affects connectivity
-        // MUST be delayed using pending dataset.
+        // MGMT_ACTIVE_SET/REPLACE.req which affects
+        // connectivity MUST be delayed using pending
+        // dataset.
 
         Get<PendingDatasetManager>().ApplyActiveDataset(info.mDataset);
     }
@@ -239,19 +223,19 @@ Error DatasetManager::HandleSet(const Coap::Message &aMessage, const Ip6::Messag
         Ip6::Address destination;
 
         SuccessOrExit(Get<NetworkData::Leader>().FindCommissioningSessionId(localSessionId));
-        SuccessOrExit(Get<Mle::MleRouter>().GetCommissionerAloc(destination, localSessionId));
+        Get<Mle::Mle>().GetCommissionerAloc(localSessionId, destination);
         Get<Leader>().SendDatasetChanged(destination);
     }
 
 exit:
-    SendSetResponse(aMessage, aMessageInfo, state);
+    SendSetOrReplaceResponse(aMessage, aMessageInfo, state);
 
     return (state == StateTlv::kAccept) ? kErrorNone : kErrorDrop;
 }
 
-void DatasetManager::SendSetResponse(const Coap::Message    &aRequest,
-                                     const Ip6::MessageInfo &aMessageInfo,
-                                     StateTlv::State         aState)
+void DatasetManager::SendSetOrReplaceResponse(const Coap::Message    &aRequest,
+                                              const Ip6::MessageInfo &aMessageInfo,
+                                              StateTlv::State         aState)
 {
     Error          error = kErrorNone;
     Coap::Message *message;
@@ -263,11 +247,14 @@ void DatasetManager::SendSetResponse(const Coap::Message    &aRequest,
 
     SuccessOrExit(error = Get<Tmf::Agent>().SendMessage(*message, aMessageInfo));
 
-    LogInfo("sent dataset set response");
+    LogInfo("sent dataset set/replace response");
 
 exit:
     FreeMessageOnError(message, error);
 }
+
+//----------------------------------------------------------------------------------------------------------------------
+// ActiveDatasetManager
 
 #if OPENTHREAD_CONFIG_OPERATIONAL_DATASET_AUTO_INIT
 Error ActiveDatasetManager::GenerateLocal(void)
@@ -276,7 +263,7 @@ Error ActiveDatasetManager::GenerateLocal(void)
     Dataset dataset;
 
     VerifyOrExit(Get<Mle::MleRouter>().IsAttached(), error = kErrorInvalidState);
-    VerifyOrExit(!mLocal.IsTimestampPresent(), error = kErrorAlready);
+    VerifyOrExit(!mLocalTimestamp.IsValid(), error = kErrorAlready);
 
     IgnoreError(Read(dataset));
 
@@ -294,6 +281,14 @@ Error ActiveDatasetManager::GenerateLocal(void)
 
         channelValue.SetChannelAndPage(Get<Mac::Mac>().GetPanChannel());
         IgnoreError(dataset.Write<ChannelTlv>(channelValue));
+    }
+
+    if (!dataset.Contains<WakeupChannelTlv>())
+    {
+        ChannelTlvValue channelValue;
+
+        channelValue.SetChannelAndPage(Get<Mac::Mac>().GetWakeupChannel());
+        IgnoreError(dataset.Write<WakeupChannelTlv>(channelValue));
     }
 
     if (!dataset.Contains<ChannelMaskTlv>())
@@ -359,8 +354,8 @@ Error ActiveDatasetManager::GenerateLocal(void)
         IgnoreError(dataset.WriteTlv(tlv));
     }
 
-    SuccessOrExit(error = mLocal.Save(dataset));
-    IgnoreError(Restore());
+    LocalSave(dataset);
+    Restore(dataset);
 
     LogInfo("Generated local dataset");
 
@@ -376,19 +371,32 @@ void ActiveDatasetManager::StartLeader(void) {}
 template <>
 void ActiveDatasetManager::HandleTmf<kUriActiveSet>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
 {
-    SuccessOrExit(DatasetManager::HandleSet(aMessage, aMessageInfo));
+    SuccessOrExit(DatasetManager::HandleSetOrReplace(kMgmtSet, aMessage, aMessageInfo));
     IgnoreError(ApplyConfiguration());
 
 exit:
     return;
 }
 
+template <>
+void ActiveDatasetManager::HandleTmf<kUriActiveReplace>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
+{
+    SuccessOrExit(DatasetManager::HandleSetOrReplace(kMgmtReplace, aMessage, aMessageInfo));
+    IgnoreError(ApplyConfiguration());
+
+exit:
+    return;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+// PendingDatasetManager
+
 void PendingDatasetManager::StartLeader(void) { StartDelayTimer(); }
 
 template <>
 void PendingDatasetManager::HandleTmf<kUriPendingSet>(Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo)
 {
-    SuccessOrExit(DatasetManager::HandleSet(aMessage, aMessageInfo));
+    SuccessOrExit(DatasetManager::HandleSetOrReplace(kMgmtSet, aMessage, aMessageInfo));
     StartDelayTimer();
 
 exit:
@@ -406,7 +414,7 @@ void PendingDatasetManager::ApplyActiveDataset(Dataset &aDataset)
     SuccessOrExit(aDataset.Write<DelayTimerTlv>(Get<Leader>().GetDelayTimerMinimal()));
 
     IgnoreError(DatasetManager::Save(aDataset));
-    StartDelayTimer();
+    StartDelayTimer(aDataset);
 
 exit:
     return;

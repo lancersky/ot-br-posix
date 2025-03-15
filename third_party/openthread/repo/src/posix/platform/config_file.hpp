@@ -30,6 +30,7 @@
 #define OT_POSIX_PLATFORM_CONFIG_FILE_HPP_
 
 #include <assert.h>
+#include <limits.h>
 #include <stdint.h>
 #include <openthread/error.h>
 
@@ -38,7 +39,6 @@ namespace Posix {
 
 /**
  * Provides read/write/clear methods for key/value configuration files.
- *
  */
 class ConfigFile
 {
@@ -47,7 +47,6 @@ public:
      * Initializes the configuration file path.
      *
      * @param[in]  aFilePath  A pointer to the null-terminated file path.
-     *
      */
     explicit ConfigFile(const char *aFilePath);
 
@@ -64,7 +63,6 @@ public:
      * @retval OT_ERROR_NONE          The given configuration was found and fetched successfully.
      * @retval OT_ERROR_NOT_FOUND     The given key or iterator was not found in the configuration file.
      * @retval OT_ERROR_INVALID_ARGS  If @p aKey was NULL.
-     *
      */
     otError Get(const char *aKey, int &aIterator, char *aValue, int aValueLength) const;
 
@@ -76,7 +74,6 @@ public:
      *
      * @retval OT_ERROR_NONE          The given key was found and removed successfully.
      * @retval OT_ERROR_INVALID_ARGS  If @p aKey or @p aValue was NULL.
-     *
      */
     otError Add(const char *aKey, const char *aValue);
 
@@ -87,7 +84,6 @@ public:
      *
      * @retval OT_ERROR_NONE          The given key was found and removed successfully.
      * @retval OT_ERROR_INVALID_ARGS  If @p aKey was NULL.
-     *
      */
     otError Clear(const char *aKey);
 
@@ -98,7 +94,6 @@ public:
      *
      * @retval TRUE  If the key exists in the configuration file.
      * @retval FALSE If the key does not exist in the configuration file.
-     *
      */
     bool HasKey(const char *aKey) const;
 
@@ -107,7 +102,6 @@ public:
      *
      * @retval TRUE  If the configuration file exists.
      * @retval FALSE If the configuration file does not exist.
-     *
      */
     bool DoesExist(void) const;
 
@@ -115,7 +109,7 @@ private:
     const char               *kCommentDelimiter = "#";
     const char               *kSwapSuffix       = ".swap";
     static constexpr uint16_t kLineMaxSize      = 512;
-    static constexpr uint16_t kFileNameMaxSize  = 255;
+    static constexpr uint16_t kFilePathMaxSize  = PATH_MAX;
 
     void Strip(char *aString) const;
 

@@ -36,6 +36,7 @@
 #if OPENTHREAD_POSIX_CONFIG_SPINEL_VENDOR_INTERFACE_ENABLE
 
 #include "vendor_interface.hpp"
+#include "common/code_utils.hpp"
 #include "common/new.hpp"
 
 namespace ot {
@@ -44,7 +45,6 @@ using ot::Spinel::SpinelInterface;
 
 /**
  * Defines the vendor implementation object.
- *
  */
 class VendorInterfaceImpl
 {

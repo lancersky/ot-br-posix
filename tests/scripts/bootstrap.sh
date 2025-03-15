@@ -68,7 +68,8 @@ install_common_dependencies()
         coreutils \
         git \
         libprotobuf-dev \
-        protobuf-compiler
+        protobuf-compiler \
+        socat
 }
 
 install_openthread_binraries()
@@ -113,8 +114,12 @@ case "$(uname)" in
 
         if [ "$BUILD_TARGET" == check ] || [ "$BUILD_TARGET" == meshcop ]; then
             install_openthread_binraries
-            sudo apt-get install --no-install-recommends -y avahi-daemon avahi-utils cpputest
+            sudo apt-get install --no-install-recommends -y avahi-daemon avahi-utils
             configure_network
+        fi
+
+        if [ "$BUILD_TARGET" == ncp_mode ]; then
+            sudo apt-get install --no-install-recommends -y avahi-daemon avahi-utils
         fi
 
         if [ "$BUILD_TARGET" == scan-build ]; then

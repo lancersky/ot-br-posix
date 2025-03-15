@@ -39,6 +39,7 @@
 
 #include "common/arg_macros.hpp"
 #include "common/array.hpp"
+#include "common/clearable.hpp"
 #include "common/string.hpp"
 #include "common/time.hpp"
 #include "instance/instance.hpp"
@@ -224,6 +225,8 @@ void InitTest(void)
 
 void FinalizeTest(void)
 {
+    AdvanceTime(30 * 1000);
+
     SuccessOrQuit(otIp6SetEnabled(sInstance, false));
     SuccessOrQuit(otThreadSetEnabled(sInstance, false));
     // Make sure there is no message/buffer leak
@@ -349,6 +352,64 @@ const char *ServiceModeToString(Dns::Client::QueryConfig::ServiceMode aMode)
     static_assert(Dns::Client::QueryConfig::kServiceModeSrvTxtOptimize == 5, "SrvTxtOptimize value is incorrect");
 
     return kServiceModeStrings[aMode];
+}
+
+//- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+static constexpr uint16_t kMaxAddresses = 10;
+
+struct AddressInfo
+{
+    void Reset(void) { ClearAllBytes(*this); }
+
+    uint16_t          mCallbackCount;
+    Error             mError;
+    Dns::Name::Buffer mHostName;
+    Ip6::Address      mHostAddresses[kMaxAddresses];
+    uint8_t           mNumHostAddresses;
+};
+
+static AddressInfo sAddressInfo;
+
+void AddressCallback(otError aError, const otDnsAddressResponse *aResponse, void *aContext)
+{
+    const Dns::Client::AddressResponse &response = AsCoreType(aResponse);
+
+    Log("AddressCallback");
+    Log("   Error: %s", ErrorToString(aError));
+
+    VerifyOrQuit(aContext == sInstance);
+
+    sAddressInfo.mCallbackCount++;
+    sAddressInfo.mError = aError;
+
+    SuccessOrExit(aError);
+
+    SuccessOrQuit(response.GetHostName(sAddressInfo.mHostName, sizeof(sAddressInfo.mHostName)));
+    Log("   HostName: %s", sAddressInfo.mHostName);
+
+    for (uint16_t index = 0;; index++)
+    {
+        Error    error;
+        uint32_t ttl;
+
+        VerifyOrQuit(index < kMaxAddresses);
+
+        error = response.GetAddress(index, sAddressInfo.mHostAddresses[index], ttl);
+
+        if (error == kErrorNotFound)
+        {
+            sAddressInfo.mNumHostAddresses = index;
+            break;
+        }
+
+        SuccessOrQuit(error);
+
+        Log("  %2u) %s ttl:%lu", index + 1, sAddressInfo.mHostAddresses[index].ToString().AsCString(), ToUlong(ttl));
+    }
+
+exit:
+    return;
 }
 
 //- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -497,20 +558,39 @@ void TestDnsClient(void)
         Dns::Client::QueryConfig::kServiceModeSrvTxtOptimize,
     };
 
-    Array<Ip6::Address, kNumAddresses> addresses;
-    Srp::Server                       *srpServer;
-    Srp::Client                       *srpClient;
-    Srp::Client::Service               service1;
-    Srp::Client::Service               service2;
-    Dns::Client                       *dnsClient;
-    Dns::Client::QueryConfig           queryConfig;
-    Dns::ServiceDiscovery::Server     *dnsServer;
-    uint16_t                           heapAllocations;
+    Array<Ip6::Address, kNumAddresses>      addresses;
+    NetworkData::ExternalRouteConfig        routeConfig;
+    Srp::Server                            *srpServer;
+    Srp::Client                            *srpClient;
+    Srp::Client::Service                    service1;
+    Srp::Client::Service                    service2;
+    Dns::Client                            *dnsClient;
+    Dns::Client::QueryConfig                queryConfig;
+    Dns::ServiceDiscovery::Server          *dnsServer;
+    Dns::ServiceDiscovery::Server::Counters oldServerCounters;
+    Dns::ServiceDiscovery::Server::Counters newServerCounters;
+    uint16_t                                heapAllocations;
 
     Log("--------------------------------------------------------------------------------------------");
     Log("TestDnsClient");
 
     InitTest();
+
+    Log("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ");
+    Log("Add a route prefix (with NAT64 flag) to network data");
+
+    routeConfig.Clear();
+    SuccessOrQuit(AsCoreType(&routeConfig.mPrefix.mPrefix).FromString("64:ff9b::"));
+    routeConfig.mPrefix.mLength = 96;
+    routeConfig.mPreference     = NetworkData::kRoutePreferenceMedium;
+    routeConfig.mNat64          = true;
+    routeConfig.mStable         = true;
+
+    SuccessOrQuit(otBorderRouterAddRoute(sInstance, &routeConfig));
+    SuccessOrQuit(otBorderRouterRegister(sInstance));
+
+    Log("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ");
+    Log("Add addresses on Thread netif");
 
     for (const char *addrString : kAddresses)
     {
@@ -580,6 +660,40 @@ void TestDnsClient(void)
 
     VerifyOrQuit(dnsClient->GetDefaultConfig().GetServiceMode() ==
                  Dns::Client::QueryConfig::kServiceModeSrvTxtOptimize);
+
+    //- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    // Validate DNS Client `ResolveAddress()`
+
+    sAddressInfo.Reset();
+    Log("ResolveAddress(%s)", kHostFullName);
+    SuccessOrQuit(dnsClient->ResolveAddress(kHostFullName, AddressCallback, sInstance));
+    AdvanceTime(100);
+    VerifyOrQuit(sAddressInfo.mCallbackCount == 1);
+    SuccessOrQuit(sAddressInfo.mError);
+    VerifyOrQuit(sAddressInfo.mNumHostAddresses == GetArrayLength(kAddresses));
+
+    for (uint8_t index = 0; index < sAddressInfo.mNumHostAddresses; index++)
+    {
+        VerifyOrQuit(addresses.Contains(sAddressInfo.mHostAddresses[index]));
+    }
+
+    //- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    // Validate DNS Client `ResolveIp4Address()`
+
+    sAddressInfo.Reset();
+    Log("ResolveIp4Address(%s)", kHostFullName);
+    SuccessOrQuit(dnsClient->ResolveIp4Address(kHostFullName, AddressCallback, sInstance));
+    AdvanceTime(100);
+    VerifyOrQuit(sAddressInfo.mCallbackCount == 1);
+    SuccessOrQuit(sAddressInfo.mError);
+    VerifyOrQuit(sAddressInfo.mNumHostAddresses == 0);
+
+    sAddressInfo.Reset();
+    Log("ResolveIp4Address(%s)", "badname");
+    SuccessOrQuit(dnsClient->ResolveIp4Address("badname", AddressCallback, sInstance));
+    AdvanceTime(100);
+    VerifyOrQuit(sAddressInfo.mCallbackCount == 1);
+    VerifyOrQuit(sAddressInfo.mError != kErrorNone);
 
     //- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
     // Validate DNS Client `Browse()`
@@ -671,8 +785,8 @@ void TestDnsClient(void)
 
     Log("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ");
 
-    Log("Set TestMode on server to only accept single question");
-    dnsServer->SetTestMode(Dns::ServiceDiscovery::Server::kTestModeSingleQuestionOnly);
+    Log("Set TestMode on server to reject multi-question queries and send error");
+    dnsServer->SetTestMode(Dns::ServiceDiscovery::Server::kTestModeRejectMultiQuestionQuery);
 
     Log("ResolveService(%s,%s) with ServiceMode %s", kInstance1Label, kService1FullName,
         ServiceModeToString(Dns::Client::QueryConfig::kServiceModeSrvTxtOptimize));
@@ -703,6 +817,48 @@ void TestDnsClient(void)
 
     VerifyOrQuit(sResolveServiceInfo.mCallbackCount == 1);
     VerifyOrQuit(sResolveServiceInfo.mError != kErrorNone);
+
+    dnsServer->SetTestMode(Dns::ServiceDiscovery::Server::kTestModeDisabled);
+
+    Log("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ");
+
+    Log("Set TestMode on server to ignore multi-question queries (send no response)");
+    dnsServer->SetTestMode(Dns::ServiceDiscovery::Server::kTestModeIgnoreMultiQuestionQuery);
+
+    Log("ResolveService(%s,%s) with ServiceMode %s", kInstance1Label, kService1FullName,
+        ServiceModeToString(Dns::Client::QueryConfig::kServiceModeSrvTxtOptimize));
+
+    queryConfig.Clear();
+    queryConfig.mServiceMode = static_cast<otDnsServiceMode>(Dns::Client::QueryConfig::kServiceModeSrvTxtOptimize);
+
+    sResolveServiceInfo.Reset();
+    SuccessOrQuit(
+        dnsClient->ResolveService(kInstance1Label, kService1FullName, ServiceCallback, sInstance, &queryConfig));
+
+    AdvanceTime(10 * 1000); // Wait longer than client response timeout.
+
+    VerifyOrQuit(sResolveServiceInfo.mCallbackCount == 1);
+    SuccessOrQuit(sResolveServiceInfo.mError);
+
+    // Use `kServiceModeSrvTxt` and check that server does ignore two questions.
+
+    Log("ResolveService(%s,%s) with ServiceMode %s", kInstance1Label, kService1FullName,
+        ServiceModeToString(Dns::Client::QueryConfig::kServiceModeSrvTxt));
+
+    queryConfig.Clear();
+    queryConfig.mServiceMode = static_cast<otDnsServiceMode>(Dns::Client::QueryConfig::kServiceModeSrvTxt);
+
+    sResolveServiceInfo.Reset();
+    SuccessOrQuit(
+        dnsClient->ResolveService(kInstance1Label, kService1FullName, ServiceCallback, sInstance, &queryConfig));
+
+    // Wait for the client to time out after exhausting all retry attempts, and
+    // ensure that a `kErrorResponseTimeout` error is reported.
+
+    AdvanceTime(45 * 1000);
+
+    VerifyOrQuit(sResolveServiceInfo.mCallbackCount == 1);
+    VerifyOrQuit(sResolveServiceInfo.mError == kErrorResponseTimeout);
 
     dnsServer->SetTestMode(Dns::ServiceDiscovery::Server::kTestModeDisabled);
 
@@ -832,13 +988,15 @@ void TestDnsClient(void)
     Log("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ");
     Log("Set TestMode on server to not include any RR in additional section AND to only accept single question");
     dnsServer->SetTestMode(Dns::ServiceDiscovery::Server::kTestModeEmptyAdditionalSection +
-                           Dns::ServiceDiscovery::Server::kTestModeSingleQuestionOnly);
+                           Dns::ServiceDiscovery::Server::kTestModeRejectMultiQuestionQuery);
 
     Log("ResolveServiceAndHostAddress(%s,%s) with ServiceMode: %s", kInstance1Label, kService1FullName,
         ServiceModeToString(Dns::Client::QueryConfig::kServiceModeSrvTxtOptimize));
 
     queryConfig.Clear();
     queryConfig.mServiceMode = static_cast<otDnsServiceMode>(Dns::Client::QueryConfig::kServiceModeSrvTxtOptimize);
+
+    oldServerCounters = dnsServer->GetCounters();
 
     sResolveServiceInfo.Reset();
     SuccessOrQuit(dnsClient->ResolveServiceAndHostAddress(kInstance1Label, kService1FullName, ServiceCallback,
@@ -864,6 +1022,55 @@ void TestDnsClient(void)
     {
         VerifyOrQuit(addresses.Contains(sResolveServiceInfo.mHostAddresses[index]));
     }
+
+    newServerCounters = dnsServer->GetCounters();
+
+    Log("Validate (using server counter) that client first tried to query SRV/TXT together and failed");
+    Log("and then send separate queries (for SRV, TXT and AAAA)");
+    Log("  Total : %2u -> %2u", oldServerCounters.GetTotalQueries(), newServerCounters.GetTotalQueries());
+    Log("  Failed: %2u -> %2u", oldServerCounters.GetTotalFailedQueries(), newServerCounters.GetTotalFailedQueries());
+
+    VerifyOrQuit(newServerCounters.GetTotalFailedQueries() == 1 + oldServerCounters.GetTotalFailedQueries());
+    VerifyOrQuit(newServerCounters.GetTotalQueries() == 4 + oldServerCounters.GetTotalQueries());
+
+    Log("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ");
+    Log("Resolve service again now using `kServiceModeSrvTxtOptimize` as default config");
+    Log("Client should already know that server is not capable of handling multi-question query");
+
+    queryConfig.Clear();
+    queryConfig.mServiceMode = static_cast<otDnsServiceMode>(Dns::Client::QueryConfig::kServiceModeSrvTxtOptimize);
+
+    dnsClient->SetDefaultConfig(queryConfig);
+
+    Log("ResolveService(%s,%s)", kInstance1Label, kService1FullName);
+
+    oldServerCounters = dnsServer->GetCounters();
+
+    sResolveServiceInfo.Reset();
+    SuccessOrQuit(dnsClient->ResolveService(kInstance1Label, kService1FullName, ServiceCallback, sInstance, nullptr));
+
+    AdvanceTime(100);
+
+    VerifyOrQuit(sResolveServiceInfo.mCallbackCount == 1);
+    SuccessOrQuit(sResolveServiceInfo.mError);
+
+    VerifyOrQuit(sResolveServiceInfo.mInfo.mTtl != 0);
+    VerifyOrQuit(sResolveServiceInfo.mInfo.mPort == service1.mPort);
+    VerifyOrQuit(sResolveServiceInfo.mInfo.mWeight == service1.mWeight);
+    VerifyOrQuit(strcmp(sResolveServiceInfo.mInfo.mHostNameBuffer, kHostFullName) == 0);
+
+    VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataTtl != 0);
+    VerifyOrQuit(sResolveServiceInfo.mInfo.mTxtDataSize != 0);
+
+    newServerCounters = dnsServer->GetCounters();
+
+    Log("Client should already know that server is not capable of handling multi-question query");
+    Log("Check server counters to validate that client did send separate queries for TXT and SRV");
+    Log("  Total : %2u -> %2u", oldServerCounters.GetTotalQueries(), newServerCounters.GetTotalQueries());
+    Log("  Failed: %2u -> %2u", oldServerCounters.GetTotalFailedQueries(), newServerCounters.GetTotalFailedQueries());
+
+    VerifyOrQuit(newServerCounters.GetTotalFailedQueries() == oldServerCounters.GetTotalFailedQueries());
+    VerifyOrQuit(newServerCounters.GetTotalQueries() == 2 + oldServerCounters.GetTotalQueries());
 
     dnsServer->SetTestMode(Dns::ServiceDiscovery::Server::kTestModeDisabled);
 

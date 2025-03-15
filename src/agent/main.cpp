@@ -31,10 +31,6 @@
 #include <openthread-br/config.h>
 
 #include <algorithm>
-#include <fstream>
-#include <mutex>
-#include <sstream>
-#include <string>
 #include <vector>
 
 #include <assert.h>
@@ -47,7 +43,7 @@
 #include <openthread/logging.h>
 #include <openthread/platform/radio.h>
 
-#if __ANDROID__ && OTBR_CONFIG_ANDROID_PROPERTY_ENABLE
+#if OTBR_ENABLE_PLATFORM_ANDROID
 #include <cutils/properties.h>
 #endif
 
@@ -56,12 +52,21 @@
 #include "common/logging.hpp"
 #include "common/mainloop.hpp"
 #include "common/types.hpp"
-#include "ncp/ncp_openthread.hpp"
+#include "host/thread_host.hpp"
 
-static const char kDefaultInterfaceName[] = "wpan0";
+#ifdef OTBR_ENABLE_PLATFORM_ANDROID
+#include <log/log.h>
+#ifndef __ANDROID__
+#error "OTBR_ENABLE_PLATFORM_ANDROID can be enabled for only Android devices"
+#endif
+#endif
+
+#define DEFAULT_INTERFACE_NAME "wpan0"
+static const char kDefaultInterfaceName[] = DEFAULT_INTERFACE_NAME;
 
 // Port number used by Rest server.
 static const uint32_t kPortNumber = 8081;
+#define HELP_DEFAULT_REST_PORT_NUMBER "8081"
 
 enum
 {
@@ -79,7 +84,7 @@ enum
     OTBR_OPT_REST_LISTEN_PORT,
 };
 
-#ifndef __ANDROID__
+#ifndef OTBR_ENABLE_PLATFORM_ANDROID
 static jmp_buf sResetJump;
 #endif
 static otbr::Application *gApp = nullptr;
@@ -117,6 +122,7 @@ exit:
     return successful;
 }
 
+#ifndef OTBR_ENABLE_PLATFORM_ANDROID
 static constexpr char kAutoAttachDisableArg[] = "--auto-attach=0";
 static char           sAutoAttachDisableArgStorage[sizeof(kAutoAttachDisableArg)];
 
@@ -134,14 +140,27 @@ static std::vector<char *> AppendAutoAttachDisableArg(int argc, char *argv[])
 
     return args;
 }
+#endif
 
 static void PrintHelp(const char *aProgramName)
 {
     fprintf(stderr,
             "Usage: %s [-I interfaceName] [-B backboneIfName] [-d DEBUG_LEVEL] [-v] [-s] [--auto-attach[=0/1]] "
             "RADIO_URL [RADIO_URL]\n"
-            "    --auto-attach defaults to 1\n"
-            "    -s disables syslog and prints to standard out\n",
+            "     -I, --thread-ifname    Name of the Thread network interface (default: " DEFAULT_INTERFACE_NAME ").\n"
+            "     -B, --backbone-ifname  Name of the backbone network interfaces (can be specified multiple times).\n"
+            "     -d, --debug-level      The log level (EMERG=0, ALERT=1, CRIT=2, ERR=3, WARNING=4, NOTICE=5, INFO=6, "
+            "DEBUG=7).\n"
+            "     -v, --verbose          Enable verbose logging.\n"
+            "     -s, --syslog-disable   Disable syslog and print to standard out.\n"
+            "     -h, --help             Show this help text.\n"
+            "     -V, --version          Print the application's version and exit.\n"
+            "     --radio-version        Print the radio coprocessor version and exit.\n"
+            "     --auto-attach          Whether or not to automatically attach to the saved network (default: 1).\n"
+            "     --rest-listen-address  Network address to listen on for the REST API (default: [::]).\n"
+            "     --rest-listen-port     Network port to listen on for the REST API "
+            "(default: " HELP_DEFAULT_REST_PORT_NUMBER ").\n"
+            "\n",
             aProgramName);
     fprintf(stderr, "%s", otSysGetRadioUrlHelpString());
 }
@@ -159,16 +178,21 @@ static void OnAllocateFailed(void)
 
 static otbrLogLevel GetDefaultLogLevel(void)
 {
-    otbrLogLevel level = OTBR_LOG_INFO;
+#if OTBR_ENABLE_PLATFORM_ANDROID
+    // The log level is set to DEBUG by default, the final output log will be filtered by Android log system.
+    otbrLogLevel level = OTBR_LOG_DEBUG;
+    char         value[PROPERTY_VALUE_MAX];
 
-#if __ANDROID__ && OTBR_CONFIG_ANDROID_PROPERTY_ENABLE
-    char value[PROPERTY_VALUE_MAX];
+    // Set the Android log level to INFO by default.
+    __android_log_set_minimum_priority(ANDROID_LOG_INFO);
 
     property_get("ro.build.type", value, "user");
     if (!strcmp(value, "user"))
     {
         level = OTBR_LOG_WARNING;
     }
+#else
+    otbrLogLevel level = OTBR_LOG_INFO;
 #endif
 
     return level;
@@ -176,17 +200,18 @@ static otbrLogLevel GetDefaultLogLevel(void)
 
 static void PrintRadioVersionAndExit(const std::vector<const char *> &aRadioUrls)
 {
-    otbr::Ncp::ControllerOpenThread ncpOpenThread{/* aInterfaceName */ "", aRadioUrls, /* aBackboneInterfaceName */ "",
-                                                  /* aDryRun */ true, /* aEnableAutoAttach */ false};
-    const char                     *radioVersion;
+    auto host = std::unique_ptr<otbr::Host::ThreadHost>(
+        otbr::Host::ThreadHost::Create(/* aInterfaceName */ "", aRadioUrls,
+                                       /* aBackboneInterfaceName */ "",
+                                       /* aDryRun */ true, /* aEnableAutoAttach */ false));
+    const char *coprocessorVersion;
 
-    ncpOpenThread.Init();
+    host->Init();
 
-    radioVersion = otPlatRadioGetVersionString(ncpOpenThread.GetInstance());
-    otbrLogNotice("Radio version: %s", radioVersion);
-    printf("%s\n", radioVersion);
+    coprocessorVersion = host->GetCoprocessorVersion();
+    printf("%s\n", coprocessorVersion);
 
-    ncpOpenThread.Deinit();
+    host->Deinit();
 
     exit(EXIT_SUCCESS);
 }
@@ -279,7 +304,7 @@ static int realmain(int argc, char *argv[])
 
     otbrLogInit(argv[0], logLevel, verbose, syslogDisable);
     otbrLogNotice("Running %s", OTBR_PACKAGE_VERSION);
-    otbrLogNotice("Thread version: %s", otbr::Ncp::ControllerOpenThread::GetThreadVersion());
+    otbrLogNotice("Thread version: %s", otbr::Host::RcpHost::GetThreadVersion());
     otbrLogNotice("Thread interface: %s", interfaceName);
 
     if (backboneInterfaceNames.empty())
@@ -300,11 +325,26 @@ static int realmain(int argc, char *argv[])
     }
 
     {
-        otbr::Application app(interfaceName, backboneInterfaceNames, radioUrls, enableAutoAttach, restListenAddress,
-                              restListenPort);
+#if __linux__
+        otbr::Utils::InfraLinkSelector    infraLinkSelector(backboneInterfaceNames);
+        const std::string                 backboneInterfaceName = infraLinkSelector.Select();
+        otbr::Application::ErrorCondition errorCondition        = [&backboneInterfaceName, &infraLinkSelector](void) {
+            return std::string(infraLinkSelector.Select()) == backboneInterfaceName ? OTBR_ERROR_NONE
+                                                                                           : OTBR_ERROR_INFRA_LINK_CHANGED;
+        };
+#else
+        const std::string backboneInterfaceName = backboneInterfaceNames.empty() ? "" : backboneInterfaceNames.front();
+#endif
+        std::unique_ptr<otbr::Host::ThreadHost> host = otbr::Host::ThreadHost::Create(
+            interfaceName, radioUrls, backboneInterfaceName.c_str(), /* aDryRun */ false, enableAutoAttach);
+
+        otbr::Application app(*host, interfaceName, backboneInterfaceName, restListenAddress, restListenPort);
 
         gApp = &app;
         app.Init();
+#if __linux__
+        app.SetErrorCondition(errorCondition);
+#endif
 
         ret = app.Run();
 
@@ -327,7 +367,7 @@ void otPlatReset(otInstance *aInstance)
     gApp->Deinit();
     gApp = nullptr;
 
-#ifndef __ANDROID__
+#ifndef OTBR_ENABLE_PLATFORM_ANDROID
     longjmp(sResetJump, 1);
     assert(false);
 #else
@@ -339,7 +379,7 @@ void otPlatReset(otInstance *aInstance)
 
 int main(int argc, char *argv[])
 {
-#ifndef __ANDROID__
+#ifndef OTBR_ENABLE_PLATFORM_ANDROID
     if (setjmp(sResetJump))
     {
         std::vector<char *> args = AppendAutoAttachDisableArg(argc, argv);

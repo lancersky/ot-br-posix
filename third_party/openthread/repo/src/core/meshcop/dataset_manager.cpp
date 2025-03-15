@@ -29,24 +29,11 @@
 /**
  * @file
  *   This file implements MeshCoP Datasets manager to process commands.
- *
  */
 
 #include "dataset_manager.hpp"
 
-#include <stdio.h>
-
-#include "common/as_core_type.hpp"
-#include "common/locator_getters.hpp"
-#include "common/log.hpp"
-#include "common/notifier.hpp"
 #include "instance/instance.hpp"
-#include "meshcop/meshcop.hpp"
-#include "meshcop/meshcop_tlvs.hpp"
-#include "radio/radio.hpp"
-#include "thread/thread_netif.hpp"
-#include "thread/thread_tlvs.hpp"
-#include "thread/uri_paths.hpp"
 
 namespace ot {
 namespace MeshCoP {
@@ -56,37 +43,114 @@ RegisterLogModule("DatasetManager");
 //---------------------------------------------------------------------------------------------------------------------
 // DatasetManager
 
-DatasetManager::DatasetManager(Instance &aInstance, Dataset::Type aType, Timer::Handler aTimerHandler)
+DatasetManager::DatasetManager(Instance &aInstance, Type aType, Timer::Handler aTimerHandler)
     : InstanceLocator(aInstance)
-    , mLocal(aInstance, aType)
-    , mTimestampValid(false)
+    , mType(aType)
+    , mLocalSaved(false)
     , mMgmtPending(false)
+    , mLocalUpdateTime(0)
     , mTimer(aInstance, aTimerHandler)
 {
-    mTimestamp.Clear();
+    mLocalTimestamp.SetToInvalid();
+    mNetworkTimestamp.SetToInvalid();
 }
-
-const Timestamp *DatasetManager::GetTimestamp(void) const { return mTimestampValid ? &mTimestamp : nullptr; }
 
 Error DatasetManager::Restore(void)
 {
     Error   error;
     Dataset dataset;
 
+    // If `Read()` fails, `dataset` will remain empty. We still call
+    // `Restore(dataset)` to stop timer and clear the timestamp
+    // flags.
+
+    error = Read(dataset);
+    Restore(dataset);
+
+    return error;
+}
+
+void DatasetManager::Restore(const Dataset &aDataset)
+{
     mTimer.Stop();
 
-    mTimestampValid = false;
+    mNetworkTimestamp.SetToInvalid();
+    mLocalTimestamp.SetToInvalid();
 
-    SuccessOrExit(error = mLocal.Restore(dataset));
+    VerifyOrExit(aDataset.GetLength() != 0);
 
-    mTimestampValid = (dataset.ReadTimestamp(GetType(), mTimestamp) == kErrorNone);
+    mLocalSaved = true;
+
+    if (aDataset.ReadTimestamp(mType, mLocalTimestamp) == kErrorNone)
+    {
+        mNetworkTimestamp = mLocalTimestamp;
+    }
 
     if (IsActiveDataset())
     {
-        IgnoreError(dataset.ApplyConfiguration(GetInstance()));
+        IgnoreError(ApplyConfiguration(aDataset));
     }
 
     SignalDatasetChange();
+
+exit:
+    return;
+}
+
+Error DatasetManager::Read(Dataset &aDataset) const
+{
+    Error error;
+
+    aDataset.Clear();
+
+    SuccessOrExit(error = Get<Settings>().ReadOperationalDataset(mType, aDataset));
+
+#if OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE
+    EmplaceSecurelyStoredKeys(aDataset);
+#endif
+
+    if (mType == Dataset::kActive)
+    {
+        aDataset.RemoveTlv(Tlv::kPendingTimestamp);
+        aDataset.RemoveTlv(Tlv::kDelayTimer);
+    }
+    else
+    {
+        Tlv *tlv = aDataset.FindTlv(Tlv::kDelayTimer);
+
+        VerifyOrExit(tlv != nullptr);
+        tlv->WriteValueAs<DelayTimerTlv>(DelayTimerTlv::CalculateRemainingDelay(*tlv, mLocalUpdateTime));
+    }
+
+    aDataset.mUpdateTime = TimerMilli::GetNow();
+
+exit:
+    return error;
+}
+
+Error DatasetManager::Read(Dataset::Info &aDatasetInfo) const
+{
+    Dataset dataset;
+    Error   error;
+
+    aDatasetInfo.Clear();
+
+    SuccessOrExit(error = Read(dataset));
+    dataset.ConvertTo(aDatasetInfo);
+
+exit:
+    return error;
+}
+
+Error DatasetManager::Read(Dataset::Tlvs &aDatasetTlvs) const
+{
+    Dataset dataset;
+    Error   error;
+
+    ClearAllBytes(aDatasetTlvs);
+
+    SuccessOrExit(error = Read(dataset));
+    dataset.ConvertTo(aDatasetTlvs);
 
 exit:
     return error;
@@ -98,7 +162,84 @@ Error DatasetManager::ApplyConfiguration(void) const
     Dataset dataset;
 
     SuccessOrExit(error = Read(dataset));
-    SuccessOrExit(error = dataset.ApplyConfiguration(GetInstance()));
+    error = ApplyConfiguration(dataset);
+
+exit:
+    return error;
+}
+
+Error DatasetManager::ApplyConfiguration(const Dataset &aDataset) const
+{
+    Error error = kErrorNone;
+
+    SuccessOrExit(error = aDataset.ValidateTlvs());
+
+    for (const Tlv *cur = aDataset.GetTlvsStart(); cur < aDataset.GetTlvsEnd(); cur = cur->GetNext())
+    {
+        switch (cur->GetType())
+        {
+        case Tlv::kChannel:
+        {
+            uint8_t channel = static_cast<uint8_t>(cur->ReadValueAs<ChannelTlv>().GetChannel());
+
+            error = Get<Mac::Mac>().SetPanChannel(channel);
+
+            if (error != kErrorNone)
+            {
+                LogCrit("Failed to set PAN channel to %u when applying dataset: %s", channel, ErrorToString(error));
+            }
+
+            break;
+        }
+
+        case Tlv::kWakeupChannel:
+        {
+#if OPENTHREAD_CONFIG_WAKEUP_COORDINATOR_ENABLE || OPENTHREAD_CONFIG_WAKEUP_END_DEVICE_ENABLE
+            uint8_t channel = static_cast<uint8_t>(cur->ReadValueAs<WakeupChannelTlv>().GetChannel());
+            error           = Get<Mac::Mac>().SetWakeupChannel(channel);
+
+            if (error != kErrorNone)
+            {
+                LogCrit("Failed to set wake-up channel to %u when applying dataset: %s", channel, ErrorToString(error));
+            }
+#endif
+            break;
+        }
+
+        case Tlv::kPanId:
+            Get<Mac::Mac>().SetPanId(cur->ReadValueAs<PanIdTlv>());
+            break;
+
+        case Tlv::kExtendedPanId:
+            Get<ExtendedPanIdManager>().SetExtPanId(cur->ReadValueAs<ExtendedPanIdTlv>());
+            break;
+
+        case Tlv::kNetworkName:
+            IgnoreError(Get<NetworkNameManager>().SetNetworkName(As<NetworkNameTlv>(cur)->GetNetworkName()));
+            break;
+
+        case Tlv::kNetworkKey:
+            Get<KeyManager>().SetNetworkKey(cur->ReadValueAs<NetworkKeyTlv>());
+            break;
+
+#if OPENTHREAD_FTD
+        case Tlv::kPskc:
+            Get<KeyManager>().SetPskc(cur->ReadValueAs<PskcTlv>());
+            break;
+#endif
+
+        case Tlv::kMeshLocalPrefix:
+            Get<Mle::MleRouter>().SetMeshLocalPrefix(cur->ReadValueAs<MeshLocalPrefixTlv>());
+            break;
+
+        case Tlv::kSecurityPolicy:
+            Get<KeyManager>().SetSecurityPolicy(As<SecurityPolicyTlv>(cur)->GetSecurityPolicy());
+            break;
+
+        default:
+            break;
+        }
+    }
 
 exit:
     return error;
@@ -106,36 +247,41 @@ exit:
 
 void DatasetManager::Clear(void)
 {
-    mTimestamp.Clear();
-    mTimestampValid = false;
-    mLocal.Clear();
+    mNetworkTimestamp.SetToInvalid();
+    mLocalTimestamp.SetToInvalid();
+
+    mLocalSaved = false;
+
+#if OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE
+    DestroySecurelyStoredKeys();
+#endif
+    Get<Settings>().DeleteOperationalDataset(mType);
+
     mTimer.Stop();
+
+    if (IsPendingDataset())
+    {
+        Get<PendingDatasetManager>().mDelayTimer.Stop();
+    }
+
     SignalDatasetChange();
 }
 
-void DatasetManager::HandleDetach(void) { IgnoreError(Restore()); }
-
-Error DatasetManager::Save(const Dataset &aDataset)
+Error DatasetManager::Save(const Dataset &aDataset, bool aAllowOlderTimestamp)
 {
     Error error = kErrorNone;
     int   compare;
-    bool  isNetworkKeyUpdated = false;
 
-    if (aDataset.ReadTimestamp(GetType(), mTimestamp) == kErrorNone)
+    if ((aDataset.ReadTimestamp(mType, mNetworkTimestamp) == kErrorNone) && IsActiveDataset())
     {
-        mTimestampValid = true;
-
-        if (IsActiveDataset())
-        {
-            SuccessOrExit(error = aDataset.ApplyConfiguration(GetInstance(), isNetworkKeyUpdated));
-        }
+        SuccessOrExit(error = ApplyConfiguration(aDataset));
     }
 
-    compare = Timestamp::Compare(mTimestampValid ? &mTimestamp : nullptr, mLocal.GetTimestamp());
+    compare = Timestamp::Compare(mNetworkTimestamp, mLocalTimestamp);
 
-    if (isNetworkKeyUpdated || compare > 0)
+    if ((compare > 0) || aAllowOlderTimestamp)
     {
-        SuccessOrExit(error = mLocal.Save(aDataset));
+        LocalSave(aDataset);
 
 #if OPENTHREAD_FTD
         Get<NetworkData::Leader>().IncrementVersionAndStableVersion();
@@ -152,57 +298,48 @@ exit:
     return error;
 }
 
-Error DatasetManager::Save(const Dataset::Info &aDatasetInfo)
+void DatasetManager::SaveLocal(const Dataset::Info &aDatasetInfo)
 {
-    Error error;
+    Dataset dataset;
 
-    SuccessOrExit(error = mLocal.Save(aDatasetInfo));
-    HandleDatasetUpdated();
+    dataset.SetFrom(aDatasetInfo);
+    SaveLocal(dataset);
+}
+
+Error DatasetManager::SaveLocal(const Dataset::Tlvs &aDatasetTlvs)
+{
+    Error   error = kErrorInvalidArgs;
+    Dataset dataset;
+
+    SuccessOrExit(dataset.SetFrom(aDatasetTlvs));
+    SuccessOrExit(dataset.ValidateTlvs());
+    SaveLocal(dataset);
+    error = kErrorNone;
 
 exit:
     return error;
 }
 
-Error DatasetManager::Save(const Dataset::Tlvs &aDatasetTlvs)
+void DatasetManager::SaveLocal(const Dataset &aDataset)
 {
-    Error error;
+    LocalSave(aDataset);
 
-    SuccessOrExit(error = mLocal.Save(aDatasetTlvs));
-    HandleDatasetUpdated();
-
-exit:
-    return error;
-}
-
-Error DatasetManager::SaveLocal(const Dataset &aDataset)
-{
-    Error error;
-
-    SuccessOrExit(error = mLocal.Save(aDataset));
-    HandleDatasetUpdated();
-
-exit:
-    return error;
-}
-
-void DatasetManager::HandleDatasetUpdated(void)
-{
     switch (Get<Mle::MleRouter>().GetRole())
     {
     case Mle::kRoleDisabled:
-        IgnoreError(Restore());
+        Restore(aDataset);
         break;
 
     case Mle::kRoleChild:
-        SendSet();
+        SyncLocalWithLeader(aDataset);
         break;
 #if OPENTHREAD_FTD
     case Mle::kRoleRouter:
-        SendSet();
+        SyncLocalWithLeader(aDataset);
         break;
 
     case Mle::kRoleLeader:
-        IgnoreError(Restore());
+        Restore(aDataset);
         Get<NetworkData::Leader>().IncrementVersionAndStableVersion();
         break;
 #endif
@@ -212,6 +349,48 @@ void DatasetManager::HandleDatasetUpdated(void)
     }
 
     SignalDatasetChange();
+}
+
+void DatasetManager::LocalSave(const Dataset &aDataset)
+{
+#if OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE
+    DestroySecurelyStoredKeys();
+#endif
+
+    if (aDataset.GetLength() == 0)
+    {
+        Get<Settings>().DeleteOperationalDataset(mType);
+        mLocalSaved = false;
+        LogInfo("%s dataset deleted", Dataset::TypeToString(mType));
+    }
+    else
+    {
+#if OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE
+        // Store the network key and PSKC in the secure storage instead of settings.
+        Dataset dataset;
+
+        dataset.SetFrom(aDataset);
+        MoveKeysToSecureStorage(dataset);
+        Get<Settings>().SaveOperationalDataset(mType, dataset);
+#else
+        Get<Settings>().SaveOperationalDataset(mType, aDataset);
+#endif
+
+        mLocalSaved = true;
+        LogInfo("%s dataset set", Dataset::TypeToString(mType));
+    }
+
+    if (aDataset.ReadTimestamp(mType, mLocalTimestamp) != kErrorNone)
+    {
+        mLocalTimestamp.SetToInvalid();
+    }
+
+    mLocalUpdateTime = TimerMilli::GetNow();
+
+    if (IsPendingDataset())
+    {
+        Get<PendingDatasetManager>().StartDelayTimer(aDataset);
+    }
 }
 
 void DatasetManager::SignalDatasetChange(void) const
@@ -240,17 +419,29 @@ exit:
     return error;
 }
 
-void DatasetManager::HandleTimer(void) { SendSet(); }
-
-void DatasetManager::SendSet(void)
+void DatasetManager::HandleTimer(void)
 {
-    Error   error = kErrorNone;
     Dataset dataset;
+
+    SuccessOrExit(Read(dataset));
+    SyncLocalWithLeader(dataset);
+
+exit:
+    return;
+}
+
+void DatasetManager::SyncLocalWithLeader(const Dataset &aDataset)
+{
+    // Attempts to synchronize the local Dataset with the leader by
+    // sending `MGMT_SET` command if the local Dataset's timestamp is
+    // newer.
+
+    Error error = kErrorNone;
 
     VerifyOrExit(!mMgmtPending, error = kErrorBusy);
     VerifyOrExit(Get<Mle::MleRouter>().IsChild() || Get<Mle::MleRouter>().IsRouter(), error = kErrorInvalidState);
 
-    VerifyOrExit(Timestamp::Compare(GetTimestamp(), mLocal.GetTimestamp()) < 0, error = kErrorAlready);
+    VerifyOrExit(mNetworkTimestamp < mLocalTimestamp, error = kErrorAlready);
 
     if (IsActiveDataset())
     {
@@ -259,17 +450,14 @@ void DatasetManager::SendSet(void)
 
         IgnoreError(Get<PendingDatasetManager>().Read(pendingDataset));
 
-        if ((pendingDataset.Read<ActiveTimestampTlv>(timestamp) == kErrorNone) &&
-            (Timestamp::Compare(&timestamp, mLocal.GetTimestamp()) == 0))
+        if ((pendingDataset.Read<ActiveTimestampTlv>(timestamp) == kErrorNone) && (timestamp == mLocalTimestamp))
         {
             // Stop registration attempts during dataset transition
             ExitNow(error = kErrorInvalidState);
         }
     }
 
-    IgnoreError(Read(dataset));
-
-    error = SendSetRequest(dataset);
+    error = SendSetRequest(aDataset);
 
 exit:
     if (error == kErrorNoBufs)
@@ -295,7 +483,7 @@ Error DatasetManager::SendSetRequest(const Dataset &aDataset)
     VerifyOrExit(message != nullptr, error = kErrorNoBufs);
 
     SuccessOrExit(error = message->AppendBytes(aDataset.GetBytes(), aDataset.GetLength()));
-    IgnoreError(messageInfo.SetSockAddrToRlocPeerAddrToLeaderAloc());
+    messageInfo.SetSockAddrToRlocPeerAddrToLeaderAloc();
 
     SuccessOrExit(error = Get<Tmf::Agent>().SendMessage(*message, messageInfo, HandleMgmtSetResponse, this));
     mMgmtPending = true;
@@ -310,7 +498,7 @@ exit:
 void DatasetManager::HandleMgmtSetResponse(void                *aContext,
                                            otMessage           *aMessage,
                                            const otMessageInfo *aMessageInfo,
-                                           Error                aError)
+                                           otError              aError)
 {
     static_cast<DatasetManager *>(aContext)->HandleMgmtSetResponse(AsCoapMessagePtr(aMessage),
                                                                    AsCoreTypePtr(aMessageInfo), aError);
@@ -344,71 +532,83 @@ exit:
 
 void DatasetManager::HandleGet(const Coap::Message &aMessage, const Ip6::MessageInfo &aMessageInfo) const
 {
-    TlvList  tlvList;
-    uint8_t  tlvType;
-    uint16_t offset;
-    uint16_t length;
+    Error          error    = kErrorNone;
+    Coap::Message *response = ProcessGetRequest(aMessage, kCheckSecurityPolicyFlags);
 
-    SuccessOrExit(Tlv::FindTlvValueOffset(aMessage, Tlv::kGet, offset, length));
+    VerifyOrExit(response != nullptr);
+    SuccessOrExit(error = Get<Tmf::Agent>().SendMessage(*response, aMessageInfo));
 
-    for (; length > 0; length--, offset++)
-    {
-        IgnoreError(aMessage.Read(offset, tlvType));
-        tlvList.Add(tlvType);
-    }
-
-    // MGMT_PENDING_GET.rsp must include Delay Timer TLV (Thread 1.1.1
-    // Section 8.7.5.4).
-
-    if (!tlvList.IsEmpty() && IsPendingDataset())
-    {
-        tlvList.Add(Tlv::kDelayTimer);
-    }
+    LogInfo("sent %s dataset get response to %s", IsActiveDataset() ? "active" : "pending",
+            aMessageInfo.GetPeerAddr().ToString().AsCString());
 
 exit:
-    SendGetResponse(aMessage, aMessageInfo, tlvList);
+    FreeMessageOnError(response, error);
 }
 
-void DatasetManager::SendGetResponse(const Coap::Message    &aRequest,
-                                     const Ip6::MessageInfo &aMessageInfo,
-                                     const TlvList          &aTlvList) const
+Coap::Message *DatasetManager::ProcessGetRequest(const Coap::Message    &aRequest,
+                                                 SecurityPolicyCheckMode aCheckMode) const
 {
-    Error          error = kErrorNone;
-    Coap::Message *message;
+    // Processes a MGMT_ACTIVE_GET or MGMT_PENDING_GET request
+    // and prepares the response.
+
+    Error          error    = kErrorNone;
+    Coap::Message *response = nullptr;
     Dataset        dataset;
+    TlvList        tlvList;
+    OffsetRange    offsetRange;
+
+    if (Tlv::FindTlvValueOffsetRange(aRequest, Tlv::kGet, offsetRange) == kErrorNone)
+    {
+        while (!offsetRange.IsEmpty())
+        {
+            uint8_t tlvType;
+
+            IgnoreError(aRequest.Read(offsetRange, tlvType));
+            tlvList.Add(tlvType);
+            offsetRange.AdvanceOffset(sizeof(uint8_t));
+        }
+
+        // MGMT_PENDING_GET.rsp must include Delay Timer TLV (Thread 1.1.1
+        // Section 8.7.5.4).
+
+        if (!tlvList.IsEmpty() && IsPendingDataset())
+        {
+            tlvList.Add(Tlv::kDelayTimer);
+        }
+    }
+
+    // Ignore `Read()` error, since even if no Dataset is saved, we should
+    // respond with an empty one.
 
     IgnoreError(Read(dataset));
 
-    message = Get<Tmf::Agent>().NewPriorityResponseMessage(aRequest);
-    VerifyOrExit(message != nullptr, error = kErrorNoBufs);
+    response = Get<Tmf::Agent>().NewPriorityResponseMessage(aRequest);
+    VerifyOrExit(response != nullptr, error = kErrorNoBufs);
 
     for (const Tlv *tlv = dataset.GetTlvsStart(); tlv < dataset.GetTlvsEnd(); tlv = tlv->GetNext())
     {
         bool shouldAppend = true;
 
-        if (!aTlvList.IsEmpty())
+        if (!tlvList.IsEmpty())
         {
-            shouldAppend = aTlvList.Contains(tlv->GetType());
+            shouldAppend = tlvList.Contains(tlv->GetType());
         }
 
-        if ((tlv->GetType() == Tlv::kNetworkKey) && !Get<KeyManager>().GetSecurityPolicy().mObtainNetworkKeyEnabled)
+        if ((aCheckMode == kCheckSecurityPolicyFlags) && (tlv->GetType() == Tlv::kNetworkKey) &&
+            !Get<KeyManager>().GetSecurityPolicy().mObtainNetworkKeyEnabled)
         {
             shouldAppend = false;
         }
 
         if (shouldAppend)
         {
-            SuccessOrExit(error = tlv->AppendTo(*message));
+            SuccessOrExit(error = tlv->AppendTo(*response));
         }
     }
 
-    SuccessOrExit(error = Get<Tmf::Agent>().SendMessage(*message, aMessageInfo));
-
-    LogInfo("sent %s dataset get response to %s", IsActiveDataset() ? "active" : "pending",
-            aMessageInfo.GetPeerAddr().ToString().AsCString());
-
 exit:
-    FreeMessageOnError(message, error);
+    FreeAndNullMessageOnError(response, error);
+    return response;
 }
 
 Error DatasetManager::SendSetRequest(const Dataset::Info &aDatasetInfo,
@@ -492,6 +692,11 @@ Error DatasetManager::SendGetRequest(const Dataset::Components &aDatasetComponen
         tlvList.Add(Tlv::kChannel);
     }
 
+    if (aDatasetComponents.IsPresent<Dataset::kWakeupChannel>())
+    {
+        tlvList.Add(Tlv::kWakeupChannel);
+    }
+
     if (aDatasetComponents.IsPresent<Dataset::kPskc>())
     {
         tlvList.Add(Tlv::kPskc);
@@ -520,7 +725,7 @@ Error DatasetManager::SendGetRequest(const Dataset::Components &aDatasetComponen
         SuccessOrExit(error = Tlv::AppendTlv(*message, Tlv::kGet, tlvList.GetArrayBuffer(), tlvList.GetLength()));
     }
 
-    IgnoreError(messageInfo.SetSockAddrToRlocPeerAddrToLeaderAloc());
+    messageInfo.SetSockAddrToRlocPeerAddrToLeaderAloc();
 
     if (aAddress != nullptr)
     {
@@ -545,6 +750,106 @@ void DatasetManager::TlvList::Add(uint8_t aTlvType)
     }
 }
 
+#if OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE
+
+const DatasetManager::SecurelyStoredTlv DatasetManager::kSecurelyStoredTlvs[] = {
+    {
+        Tlv::kNetworkKey,
+        KeyRefManager::kActiveDatasetNetworkKey,
+        KeyRefManager::kPendingDatasetNetworkKey,
+    },
+    {
+        Tlv::kPskc,
+        KeyRefManager::kActiveDatasetPskc,
+        KeyRefManager::kPendingDatasetPskc,
+    },
+};
+
+void DatasetManager::DestroySecurelyStoredKeys(void) const
+{
+    for (const SecurelyStoredTlv &entry : kSecurelyStoredTlvs)
+    {
+        Crypto::Storage::DestroyKey(Get<KeyRefManager>().KeyRefFor(entry.GetKeyRefType(mType)));
+    }
+}
+
+void DatasetManager::MoveKeysToSecureStorage(Dataset &aDataset) const
+{
+    for (const SecurelyStoredTlv &entry : kSecurelyStoredTlvs)
+    {
+        KeyRef keyRef = Get<KeyRefManager>().KeyRefFor(entry.GetKeyRefType(mType));
+
+        SaveTlvInSecureStorageAndClearValue(aDataset, entry.mTlvType, keyRef);
+    }
+}
+
+void DatasetManager::EmplaceSecurelyStoredKeys(Dataset &aDataset) const
+{
+    bool moveKeys = false;
+
+    // If reading any of the TLVs fails, it indicates they are not yet
+    // stored in secure storage and are still contained in the `Dataset`
+    // read from `Settings`. In this case, we move the keys to secure
+    // storage and then clear them from 'Settings'.
+
+    for (const SecurelyStoredTlv &entry : kSecurelyStoredTlvs)
+    {
+        KeyRef keyRef = Get<KeyRefManager>().KeyRefFor(entry.GetKeyRefType(mType));
+
+        if (ReadTlvFromSecureStorage(aDataset, entry.mTlvType, keyRef) != kErrorNone)
+        {
+            moveKeys = true;
+        }
+    }
+
+    if (moveKeys)
+    {
+        Dataset dataset;
+
+        dataset.SetFrom(aDataset);
+        MoveKeysToSecureStorage(dataset);
+        Get<Settings>().SaveOperationalDataset(mType, dataset);
+    }
+}
+
+void DatasetManager::SaveTlvInSecureStorageAndClearValue(Dataset &aDataset, Tlv::Type aTlvType, KeyRef aKeyRef) const
+{
+    using namespace ot::Crypto::Storage;
+
+    Tlv *tlv = aDataset.FindTlv(aTlvType);
+
+    VerifyOrExit(tlv != nullptr);
+    VerifyOrExit(tlv->GetLength() > 0);
+
+    SuccessOrAssert(ImportKey(aKeyRef, kKeyTypeRaw, kKeyAlgorithmVendor, kUsageExport, kTypePersistent, tlv->GetValue(),
+                              tlv->GetLength()));
+
+    memset(tlv->GetValue(), 0, tlv->GetLength());
+
+exit:
+    return;
+}
+
+Error DatasetManager::ReadTlvFromSecureStorage(Dataset &aDataset, Tlv::Type aTlvType, KeyRef aKeyRef) const
+{
+    using namespace ot::Crypto::Storage;
+
+    Error  error = kErrorNone;
+    Tlv   *tlv   = aDataset.FindTlv(aTlvType);
+    size_t readLength;
+
+    VerifyOrExit(tlv != nullptr);
+    VerifyOrExit(tlv->GetLength() > 0);
+
+    SuccessOrExit(error = ExportKey(aKeyRef, tlv->GetValue(), tlv->GetLength(), readLength));
+    VerifyOrExit(readLength == tlv->GetLength(), error = OT_ERROR_FAILED);
+
+exit:
+    return error;
+}
+
+#endif // OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE
+
 //---------------------------------------------------------------------------------------------------------------------
 // ActiveDatasetManager
 
@@ -553,40 +858,24 @@ ActiveDatasetManager::ActiveDatasetManager(Instance &aInstance)
 {
 }
 
-bool ActiveDatasetManager::IsPartiallyComplete(void) const { return mLocal.IsSaved() && !mTimestampValid; }
+bool ActiveDatasetManager::IsPartiallyComplete(void) const { return mLocalSaved && !mNetworkTimestamp.IsValid(); }
 
-bool ActiveDatasetManager::IsComplete(void) const { return mLocal.IsSaved() && mTimestampValid; }
+bool ActiveDatasetManager::IsComplete(void) const { return mLocalSaved && mNetworkTimestamp.IsValid(); }
 
 bool ActiveDatasetManager::IsCommissioned(void) const
 {
-    Dataset::Info datasetInfo;
-    bool          isValid = false;
+    static const Tlv::Type kRequiredTlvs[] = {
+        Tlv::kNetworkKey, Tlv::kNetworkName, Tlv::kExtendedPanId, Tlv::kPanId, Tlv::kChannel,
+    };
 
-    SuccessOrExit(Read(datasetInfo));
+    Dataset dataset;
+    bool    isValid = false;
 
-    isValid = (datasetInfo.IsPresent<Dataset::kNetworkKey>() && datasetInfo.IsPresent<Dataset::kNetworkName>() &&
-               datasetInfo.IsPresent<Dataset::kExtendedPanId>() && datasetInfo.IsPresent<Dataset::kPanId>() &&
-               datasetInfo.IsPresent<Dataset::kChannel>());
+    SuccessOrExit(Read(dataset));
+    isValid = dataset.ContainsAllTlvs(kRequiredTlvs, sizeof(kRequiredTlvs));
 
 exit:
     return isValid;
-}
-
-Error ActiveDatasetManager::Save(const Timestamp &aTimestamp,
-                                 const Message   &aMessage,
-                                 uint16_t         aOffset,
-                                 uint16_t         aLength)
-{
-    Error   error = kErrorNone;
-    Dataset dataset;
-
-    SuccessOrExit(error = dataset.SetFrom(aMessage, aOffset, aLength));
-    SuccessOrExit(error = dataset.ValidateTlvs());
-    SuccessOrExit(error = dataset.Write<ActiveTimestampTlv>(aTimestamp));
-    error = DatasetManager::Save(dataset);
-
-exit:
-    return error;
 }
 
 template <>
@@ -606,67 +895,30 @@ PendingDatasetManager::PendingDatasetManager(Instance &aInstance)
 {
 }
 
-void PendingDatasetManager::Clear(void)
+Error PendingDatasetManager::ReadActiveTimestamp(Timestamp &aTimestamp) const
 {
-    DatasetManager::Clear();
-    mDelayTimer.Stop();
-}
-
-void PendingDatasetManager::ClearNetwork(void)
-{
+    Error   error = kErrorNotFound;
     Dataset dataset;
 
-    mTimestamp.Clear();
-    mTimestampValid = false;
-    IgnoreError(DatasetManager::Save(dataset));
-}
+    SuccessOrExit(Read(dataset));
 
-Error PendingDatasetManager::Save(const Dataset::Info &aDatasetInfo)
-{
-    Error error;
-
-    SuccessOrExit(error = DatasetManager::Save(aDatasetInfo));
-    StartDelayTimer();
+    SuccessOrExit(dataset.Read<ActiveTimestampTlv>(aTimestamp));
+    error = kErrorNone;
 
 exit:
     return error;
 }
 
-Error PendingDatasetManager::Save(const Dataset::Tlvs &aDatasetTlvs)
+Error PendingDatasetManager::ReadRemainingDelay(uint32_t &aRemainingDelay) const
 {
-    Error error;
+    Error     error = kErrorNone;
+    TimeMilli now   = TimerMilli::GetNow();
 
-    SuccessOrExit(error = DatasetManager::Save(aDatasetTlvs));
-    StartDelayTimer();
+    aRemainingDelay = 0;
 
-exit:
-    return error;
-}
-
-Error PendingDatasetManager::Save(const Dataset &aDataset)
-{
-    Error error;
-
-    SuccessOrExit(error = DatasetManager::SaveLocal(aDataset));
-    StartDelayTimer();
-
-exit:
-    return error;
-}
-
-Error PendingDatasetManager::Save(const Timestamp &aTimestamp,
-                                  const Message   &aMessage,
-                                  uint16_t         aOffset,
-                                  uint16_t         aLength)
-{
-    Error   error = kErrorNone;
-    Dataset dataset;
-
-    SuccessOrExit(error = dataset.SetFrom(aMessage, aOffset, aLength));
-    SuccessOrExit(error = dataset.ValidateTlvs());
-    SuccessOrExit(dataset.Write<PendingTimestampTlv>(aTimestamp));
-    SuccessOrExit(error = DatasetManager::Save(dataset));
-    StartDelayTimer();
+    VerifyOrExit(mDelayTimer.IsRunning(), error = kErrorNotFound);
+    VerifyOrExit(mDelayTimer.GetFireTime() > now);
+    aRemainingDelay = mDelayTimer.GetFireTime() - now;
 
 exit:
     return error;
@@ -674,20 +926,28 @@ exit:
 
 void PendingDatasetManager::StartDelayTimer(void)
 {
-    Tlv     *tlv;
-    uint32_t delay;
-    Dataset  dataset;
-
-    IgnoreError(Read(dataset));
+    Dataset dataset;
 
     mDelayTimer.Stop();
 
-    tlv = dataset.FindTlv(Tlv::kDelayTimer);
-    VerifyOrExit(tlv != nullptr);
+    SuccessOrExit(Read(dataset));
+    StartDelayTimer(dataset);
 
-    delay = Min(tlv->ReadValueAs<DelayTimerTlv>(), DelayTimerTlv::kMaxDelay);
+exit:
+    return;
+}
 
-    mDelayTimer.StartAt(dataset.GetUpdateTime(), delay);
+void PendingDatasetManager::StartDelayTimer(const Dataset &aDataset)
+{
+    uint32_t delay;
+
+    mDelayTimer.Stop();
+
+    SuccessOrExit(aDataset.Read<DelayTimerTlv>(delay));
+
+    delay = Min(delay, DelayTimerTlv::kMaxDelay);
+
+    mDelayTimer.StartAt(aDataset.GetUpdateTime(), delay);
     LogInfo("delay timer started %lu", ToUlong(delay));
 
 exit:
@@ -696,15 +956,46 @@ exit:
 
 void PendingDatasetManager::HandleDelayTimer(void)
 {
-    Dataset dataset;
+    Dataset   dataset;
+    Timestamp activeTimestamp;
+    bool      shouldReplaceActive = false;
 
-    IgnoreError(Read(dataset));
-    LogInfo("pending delay timer expired");
+    SuccessOrExit(Read(dataset));
 
-    dataset.ConvertToActive();
+    LogInfo("Pending delay timer expired");
 
-    Get<ActiveDatasetManager>().Save(dataset);
+    // Determine whether the Pending Dataset should replace the
+    // current Active Dataset. This is allowed if the Pending
+    // Dataset's Active Timestamp is newer, or the Pending Dataset
+    // contains a different key.
 
+    SuccessOrExit(dataset.Read<ActiveTimestampTlv>(activeTimestamp));
+
+    if (activeTimestamp > Get<ActiveDatasetManager>().GetTimestamp())
+    {
+        shouldReplaceActive = true;
+    }
+    else
+    {
+        NetworkKey newKey;
+        NetworkKey currentKey;
+
+        SuccessOrExit(dataset.Read<NetworkKeyTlv>(newKey));
+        Get<KeyManager>().GetNetworkKey(currentKey);
+        shouldReplaceActive = (currentKey != newKey);
+    }
+
+    VerifyOrExit(shouldReplaceActive);
+
+    // Convert Pending Dataset to Active by removing the Pending
+    // Timestamp and the Delay Timer TLVs.
+
+    dataset.RemoveTlv(Tlv::kPendingTimestamp);
+    dataset.RemoveTlv(Tlv::kDelayTimer);
+
+    IgnoreError(Get<ActiveDatasetManager>().Save(dataset, /* aAllowOlderTimestamp */ true));
+
+exit:
     Clear();
 }
 
